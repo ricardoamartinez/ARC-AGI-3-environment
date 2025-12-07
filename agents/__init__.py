@@ -9,9 +9,11 @@ from .templates.langgraph_functional_agent import LangGraphFunc, LangGraphTextOn
 from .templates.langgraph_random_agent import LangGraphRandom
 from .templates.langgraph_thinking import LangGraphThinking
 from .templates.llm_agents import LLM, FastLLM, GuidedLLM, ReasoningLLM
+from .templates.manual_agent import Manual
 from .templates.random_agent import Random
 from .templates.reasoning_agent import ReasoningAgent
 from .templates.smolagents import SmolCodingAgent, SmolVisionAgent
+from .templates.ppo_agent import PPOAgent
 
 load_dotenv()
 
@@ -40,6 +42,7 @@ __all__ = [
     "ReasoningLLM",
     "GuidedLLM",
     "ReasoningAgent",
+    "Manual",
     "SmolCodingAgent",
     "SmolVisionAgent",
     "Agent",
