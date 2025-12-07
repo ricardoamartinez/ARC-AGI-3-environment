@@ -13,7 +13,7 @@ from .templates.manual_agent import Manual
 from .templates.random_agent import Random
 from .templates.reasoning_agent import ReasoningAgent
 from .templates.smolagents import SmolCodingAgent, SmolVisionAgent
-from .templates.ppo_agent import PPOAgent
+from .ppo import PPOAgent
 
 load_dotenv()
 

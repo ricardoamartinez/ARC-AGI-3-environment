@@ -38,6 +38,10 @@ def main():
     state = "Starting..."
     waiting_for_server = False
     
+    # Selection Mode State
+    game_select_mode = False
+    available_games = [] # List of {"game_id": str, "title": str}
+    
     last_action_info = None
     last_click_pos = None
     last_click_time = 0
@@ -256,6 +260,11 @@ def main():
                     current_grids = [data["grid"]]
                     current_grid_idx = 0
                     waiting_for_server = False
+                
+                elif "action" in data:
+                    if data["action"] == "SHOW_GAME_SELECTOR":
+                        available_games = data.get("games", [])
+                        game_select_mode = True
                         
             except json.JSONDecodeError:
                 pass
@@ -264,7 +273,7 @@ def main():
 
         # Animation Logic
         now = pygame.time.get_ticks()
-        if current_grids and len(current_grids) > 1:
+        if not game_select_mode and current_grids and len(current_grids) > 1:
             if now - animation_timer > ANIMATION_SPEED:
                 animation_timer = now
                 if current_grid_idx < len(current_grids) - 1:
@@ -274,11 +283,139 @@ def main():
         # Draw
         screen.fill(BG_COLOR)
         
-        # Draw Sidebar
-        # Draw separator line
-        pygame.draw.line(screen, BORDER_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, WINDOW_HEIGHT), 2)
-        
-        # Draw Text Info
+        if game_select_mode:
+            # Draw Game Selection Grid
+            screen.fill((20, 20, 20)) # Dark grey bg
+            
+            title_surf = title_font.render("SELECT A GAME", True, (255, 255, 255))
+            screen.blit(title_surf, (WINDOW_WIDTH // 2 - title_surf.get_width() // 2, 20))
+            
+            # Show loading if no games yet
+            if not available_games:
+                loading_surf = font.render("Loading games...", True, (150, 150, 150))
+                screen.blit(loading_surf, (WINDOW_WIDTH // 2 - loading_surf.get_width() // 2, 100))
+                pygame.display.flip()
+                clock.tick(60)
+                continue
+            
+            # Grid Layout
+            cols = 4
+            box_w = 150
+            box_h = 150
+            gap = 20
+            start_x = 50
+            start_y = 70
+            
+            mx, my = pygame.mouse.get_pos()
+            
+            for i, g in enumerate(available_games):
+                row = i // cols
+                col = i % cols
+                
+                x = start_x + col * (box_w + gap)
+                y = start_y + row * (box_h + gap)
+                
+                # Hover detection
+                rect = pygame.Rect(x, y, box_w, box_h)
+                is_hovered = rect.collidepoint(mx, my)
+                
+                # Handle Click
+                if is_hovered and pygame.mouse.get_pressed()[0]:
+                    # Send selection and exit mode
+                    send_action("GAME_SELECTED", game_id=g["game_id"])
+                    game_select_mode = False
+                    # Clear events to prevent double click issues
+                    pygame.event.clear()
+                    
+                # Draw Box
+                color = (50, 50, 50) if not is_hovered else (80, 80, 80)
+                pygame.draw.rect(screen, color, rect)
+                pygame.draw.rect(screen, (100, 100, 100), rect, 2) # Border
+                
+                # Draw Thumbnail if available
+                thumbnail = g.get("thumbnail")
+                if thumbnail:
+                    # Calculate thumbnail area (leave room for title at bottom)
+                    thumb_area_h = box_h - 30  # Reserve bottom 30px for title
+                    thumb_area_w = box_w - 4   # Small padding
+                    thumb_x = x + 2
+                    thumb_y = y + 2
+                    
+                    # Get grid dimensions
+                    grid_rows = len(thumbnail)
+                    grid_cols = len(thumbnail[0]) if grid_rows > 0 else 0
+                    
+                    if grid_rows > 0 and grid_cols > 0:
+                        # Calculate scale to fit
+                        scale_x = thumb_area_w / grid_cols
+                        scale_y = thumb_area_h / grid_rows
+                        thumb_scale = min(scale_x, scale_y, 8)  # Max 8px per cell
+                        
+                        # Determine background color for this thumbnail
+                        flat_grid = [c for row in thumbnail for c in row]
+                        if flat_grid:
+                            counter = collections.Counter(flat_grid)
+                            bg_val, _ = counter.most_common(1)[0]
+                            # Use base palette for thumbnails
+                            thumb_palette = BASE_PALETTE.copy()
+                            if bg_val != 0:
+                                original_bg_color = thumb_palette.get(bg_val, (0,0,0))
+                                thumb_palette[bg_val] = (0, 0, 0)
+                                thumb_palette[0] = original_bg_color
+                        else:
+                            thumb_palette = BASE_PALETTE.copy()
+                        
+                        # Draw thumbnail grid (no gridlines, solid seamless fill)
+                        # Calculate total thumbnail size
+                        total_thumb_w = grid_cols * thumb_scale
+                        total_thumb_h = grid_rows * thumb_scale
+                        
+                        # Center thumbnail in available space
+                        thumb_offset_x = (thumb_area_w - total_thumb_w) // 2
+                        thumb_offset_y = (thumb_area_h - total_thumb_h) // 2
+                        
+                        for r in range(grid_rows):
+                            for c in range(grid_cols):
+                                val = thumbnail[r][c]
+                                color_val = thumb_palette.get(val, (50, 50, 50))
+                                
+                                # Calculate seamless cell boundaries
+                                cell_x = int(thumb_x + thumb_offset_x + c * thumb_scale)
+                                cell_y = int(thumb_y + thumb_offset_y + r * thumb_scale)
+                                
+                                # Calculate width/height to next cell to ensure no gaps
+                                next_cell_x = int(thumb_x + thumb_offset_x + (c + 1) * thumb_scale)
+                                next_cell_y = int(thumb_y + thumb_offset_y + (r + 1) * thumb_scale)
+                                
+                                cell_w = next_cell_x - cell_x
+                                cell_h = next_cell_y - cell_y
+                                
+                                # Only draw if within bounds
+                                if cell_x < x + box_w - 2 and cell_y < y + box_h - 30:
+                                    # Draw filled rectangle (no border, seamless)
+                                    pygame.draw.rect(screen, color_val, (cell_x, cell_y, cell_w, cell_h))
+                
+                # Draw Title at bottom
+                # Pink background for text like in the image
+                g_title = g.get("title", g["game_id"][:4].upper())
+                
+                text_surf = title_font.render(g_title, True, (0, 0, 0)) # Black text
+                text_rect = text_surf.get_rect(center=(x + box_w // 2, y + box_h - 15))
+                
+                # Pink label bg
+                label_padding = 5
+                label_bg_rect = text_rect.inflate(label_padding * 2, label_padding * 2)
+                pygame.draw.rect(screen, (255, 105, 180), label_bg_rect) # Hot Pink
+                screen.blit(text_surf, text_rect)
+
+        else:
+            # Standard Agent View
+            
+            # Draw Sidebar
+            # Draw separator line
+            pygame.draw.line(screen, BORDER_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, WINDOW_HEIGHT), 2)
+            
+            # Draw Text Info
         y_offset = 20
         def draw_text(text, font_obj, color=TEXT_COLOR):
             nonlocal y_offset
@@ -345,31 +482,55 @@ def main():
                     h_rect = (hx * SCALE_FACTOR, hy * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR)
                     pygame.draw.rect(screen, (255, 255, 255), h_rect, 2)
             
-            # Visualize last click
+            # Visualize last click with mouse cursor sprite
             if last_click_pos:
                 lx, ly = last_click_pos
                 time_diff = pygame.time.get_ticks() - last_click_time
                 if time_diff < CLICK_VIS_DURATION:
-                    # ... existing click vis ...
-                    # Calculate position
-                    cx = lx * SCALE_FACTOR + SCALE_FACTOR // 2
-                    cy = ly * SCALE_FACTOR + SCALE_FACTOR // 2
+                    # Calculate position (cursor hot spot at click location)
+                    hot_x = int(lx * SCALE_FACTOR + SCALE_FACTOR // 2)
+                    hot_y = int(ly * SCALE_FACTOR + SCALE_FACTOR // 2)
                     
-                    # Determine underlying color to invert
-                    bg_color = (0, 0, 0) 
-                    if current_grids and current_grid_idx < len(current_grids):
-                        grid = current_grids[current_grid_idx]
-                        if 0 <= ly < len(grid) and 0 <= lx < len(grid[0]):
-                            val = grid[ly][lx]
-                            bg_color = PALETTE.get(val, (0, 0, 0))
+                    # Cursor size (standard is 16x16, scale appropriately)
+                    cursor_size = max(10, min(int(SCALE_FACTOR * 1.5), 24))
                     
-                    inv_color = get_inverse_color(bg_color)
+                    # Standard Windows-style mouse cursor (arrow pointing up-left)
+                    # Hot spot is at the tip (0, 0 relative)
+                    # Define points for a simple arrow cursor
+                    points = [
+                        (0, 0),           # Tip
+                        (0, cursor_size), # Bottom-left
+                        (cursor_size * 0.3, cursor_size * 0.7), # Inner corner
+                        (cursor_size * 0.5, cursor_size * 0.9), # Tail bottom-left
+                        (cursor_size * 0.7, cursor_size * 0.7), # Tail bottom-right
+                        (cursor_size * 0.5, cursor_size * 0.5), # Tail inner
+                        (cursor_size * 0.7, cursor_size * 0.5), # Right edge
+                    ]
                     
-                    # Draw Plus Sign
-                    thick = max(2, SCALE_FACTOR // 5)
-                    size = SCALE_FACTOR // 3
-                    pygame.draw.line(screen, inv_color, (cx - size, cy), (cx + size, cy), thick)
-                    pygame.draw.line(screen, inv_color, (cx, cy - size), (cx, cy + size), thick)
+                    # Offset and rotate slightly to look natural (tilted left)
+                    # Actually, simpler: just hardcode the tilted shape
+                    tilted_points = [
+                        (0, 0),
+                        (0, cursor_size),
+                        (cursor_size * 0.25, cursor_size * 0.75),
+                        (cursor_size * 0.45, cursor_size * 1.2), # Tail extended
+                        (cursor_size * 0.65, cursor_size * 1.1), # Tail width
+                        (cursor_size * 0.45, cursor_size * 0.65),
+                        (cursor_size * 0.75, cursor_size * 0.65)
+                    ]
+                    
+                    # Adjust to screen coords
+                    screen_points = [(hot_x + p[0], hot_y + p[1]) for p in tilted_points]
+                    
+                    # Draw black outline/shadow first
+                    shadow_points = [(p[0] + 1, p[1] + 1) for p in screen_points]
+                    pygame.draw.polygon(screen, (0, 0, 0), shadow_points)
+                    
+                    # Draw white fill
+                    pygame.draw.polygon(screen, (255, 255, 255), screen_points)
+                    
+                    # Draw black border
+                    pygame.draw.polygon(screen, (0, 0, 0), screen_points, 1)
 
             # Draw Virtual Cursor
             if cursor_pos:

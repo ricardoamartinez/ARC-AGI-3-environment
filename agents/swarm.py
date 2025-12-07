@@ -48,8 +48,11 @@ class Swarm:
         self.threads = []
         self.agents = []
         self.cleanup_threads = []
+        api_key = os.getenv("ARC_API_KEY", "")
+        if not api_key:
+            logger.warning("ARC_API_KEY not found in environment variables!")
         self.headers = {
-            "X-API-Key": os.getenv("ARC_API_KEY", ""),
+            "X-API-Key": api_key,
             "Accept": "application/json",
         }
         self._session = requests.Session()

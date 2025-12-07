@@ -67,6 +67,7 @@ def cleanup(
 
 
 def main() -> None:
+    print("Starting main()...", flush=True)
     log_level = logging.INFO
     if os.environ.get("DEBUG", "False") == "True":
         log_level = logging.DEBUG
@@ -146,6 +147,28 @@ def main() -> None:
         logger.info(
             f"Using game '{game_prefix}' derived from playback recording filename"
         )
+    
+    # If API returns empty but user provided a game ID, use it directly
+    if not full_games and args.game:
+        logger.info(
+            f"API returned empty game list, but using provided game ID: {args.game}"
+        )
+        full_games = args.game.split(",")
+    
+    # INTERACTIVE SELECTION FOR PPO AGENT
+    if args.agent == "ppoagent" and not args.game:
+        from agents.ppo.agent import PPOAgent
+        logger.info("No game specified for PPOAgent. Launching interactive game selector...")
+        selected_id = PPOAgent.select_game_interactively(ROOT_URL, HEADERS)
+        if selected_id:
+            logger.info(f"Selected game: {selected_id}")
+            # Treat as if the user passed this game ID
+            args.game = selected_id
+            full_games = [selected_id]
+        else:
+            logger.info("No game selected or selection cancelled. Exiting.")
+            return
+
     games = full_games[:]
     if args.game:
         filters = args.game.split(",")

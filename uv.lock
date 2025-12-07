@@ -145,6 +145,7 @@ dependencies = [
     { name = "langchain", extra = ["openai"] },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
+    { name = "langsmith" },
     { name = "numpy" },
     { name = "openai" },
     { name = "pillow" },
@@ -153,6 +154,7 @@ dependencies = [
     { name = "requests" },
     { name = "smolagents" },
     { name = "stable-baselines3" },
+    { name = "torch" },
 ]
 
 [package.optional-dependencies]
@@ -178,6 +180,7 @@ requires-dist = [
     { name = "langchain", extras = ["openai"], specifier = ">=0.3.27" },
     { name = "langgraph", specifier = ">=0.6.3" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=2.0.11" },
+    { name = "langsmith", specifier = ">=0.4.10" },
     { name = "numpy", specifier = ">=2.3.2" },
     { name = "openai", specifier = "==1.72.0" },
     { name = "pillow", specifier = ">=11.2.1" },
@@ -186,6 +189,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.32.4" },
     { name = "smolagents", specifier = ">=1.20.0" },
     { name = "stable-baselines3", specifier = ">=2.7.1" },
+    { name = "torch", specifier = ">=2.9.1" },
 ]
 provides-extras = ["agentops"]
 
