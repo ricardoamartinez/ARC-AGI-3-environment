@@ -26,6 +26,7 @@ def main():
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("Arial", 16)
     title_font = pygame.font.SysFont("Arial", 20, bold=True)
+    overlay_font = pygame.font.SysFont("Arial", 32, bold=True)
     
     # State
     current_grids = [] # List of grids for animation
@@ -51,6 +52,10 @@ def main():
     last_click_pos = None
     last_click_time = 0
     CLICK_VIS_DURATION = 500 # ms
+    
+    # Keyboard Symbol Persistence
+    key_activations = {} # symbol -> timestamp
+    KEY_FADE_DURATION = 300 # Fast fade for responsiveness
     
     cursor_pos = None # (x, y) target
     visual_cursor_pos = None # (x, y) current interpolated
@@ -100,7 +105,8 @@ def main():
         "reward": [],
         "dopamine": [],
         "confidence": [],
-        "manual_dopamine": []
+        "manual_dopamine": [],
+        "trigger": []
     }
     MAX_HISTORY = 200
     
@@ -230,7 +236,7 @@ def main():
         # Manual Dopamine Logic
         # Gradual release: Slower rise/fall
         if holding_d_key:
-            manual_dopamine_val = min(1.0, manual_dopamine_val + 0.01) # Slower rise (was 0.05)
+            manual_dopamine_val = min(1.0, manual_dopamine_val + 0.02) # Double the rise rate (was 0.01)
         else:
             manual_dopamine_val = max(0.0, manual_dopamine_val - 0.01) # Slower decay
             
@@ -300,6 +306,7 @@ def main():
                     if "dopamine" in m: metrics_history["dopamine"].append(m["dopamine"])
                     if "plan_confidence" in m: metrics_history["confidence"].append(m["plan_confidence"])
                     if "manual_dopamine" in m: metrics_history["manual_dopamine"].append(m["manual_dopamine"])
+                    if "trigger" in m: metrics_history["trigger"].append(m["trigger"])
                     
                     # Trim
                     for k in metrics_history:
@@ -561,15 +568,26 @@ def main():
             
         if last_action_info:
             aid = last_action_info.get("id")
-            aname = ACTION_NAMES.get(aid, last_action_info.get("name", str(aid)))
+            # Prioritize name sent by environment (contains symbols)
+            aname = last_action_info.get("name")
+            if not aname:
+                aname = ACTION_NAMES.get(aid, str(aid))
             
             # Add details for clicks
             if aid == 6:
                 adata = last_action_info.get("data", {})
                 if adata and "x" in adata and "y" in adata:
-                    aname += f" ({adata['x']}, {adata['y']})"
+                    if "(" not in aname:
+                        aname += f" ({adata['x']}, {adata['y']})"
             
             draw_text(f"Last Action: {aname}", font, (0, 200, 255))
+            
+            # Draw Bottom-Left Overlay
+            overlay_surf = overlay_font.render(aname, True, (0, 255, 255))
+            # Shadow
+            shadow_surf = overlay_font.render(aname, True, (0, 0, 0))
+            screen.blit(shadow_surf, (22, WINDOW_HEIGHT - 48))
+            screen.blit(overlay_surf, (20, WINDOW_HEIGHT - 50))
             
         y_offset += 20
         
@@ -634,12 +652,13 @@ def main():
 
         draw_graph("Dopamine Level (AI)", metrics_history["dopamine"], graph_start_y, (0, 255, 255), y_min=0.0, y_max=1.0)
         draw_graph("Dopamine Level (Human)", metrics_history["manual_dopamine"], graph_start_y + 90, (255, 100, 100), y_min=0.0, y_max=1.0)
-        draw_graph("Plan Confidence", metrics_history["confidence"], graph_start_y + 180, (255, 0, 255), y_min=0.0, y_max=1.0)
-        draw_graph("Avg Reward", metrics_history["reward"], graph_start_y + 270, (0, 255, 0))
+        draw_graph("Action Urge (Trigger)", metrics_history["trigger"], graph_start_y + 180, (255, 255, 0), y_min=-1.0, y_max=1.0)
+        draw_graph("Plan Confidence", metrics_history["confidence"], graph_start_y + 270, (255, 0, 255), y_min=0.0, y_max=1.0)
+        draw_graph("Avg Reward", metrics_history["reward"], graph_start_y + 360, (0, 255, 0))
         
         # --- DRAW SLIDER (Fixed Position) ---
         # Ensure it's below the graphs but ON SCREEN
-        min_slider_y = graph_start_y + 360
+        min_slider_y = graph_start_y + 450
         # Clamp to ensure visibility even if overlapping
         slider_y = min(WINDOW_HEIGHT - 60, max(WINDOW_HEIGHT - 80, min_slider_y))
         
@@ -870,10 +889,63 @@ def main():
                 # Border Black
                 pygame.draw.polygon(screen, (0, 0, 0), screen_pts, 1)
                 
-            else:
-                # Placeholder text
-                text = font.render("Waiting for game state...", True, (100, 100, 100))
-                screen.blit(text, (GRID_WIDTH // 2 - 100, WINDOW_HEIGHT // 2))
+            # Update Keyboard Symbol State
+            if last_action_info:
+                aname = last_action_info.get("name", "")
+                symbol = ""
+                if "↑" in aname: symbol = "↑"
+                elif "↓" in aname: symbol = "↓"
+                elif "←" in aname: symbol = "←"
+                elif "→" in aname: symbol = "→"
+                elif "␣" in aname: symbol = "␣"
+                elif "↵" in aname: symbol = "↵"
+                
+                if symbol:
+                    key_activations[symbol] = pygame.time.get_ticks()
+
+            # Draw Visual Keyboard (Bottom Left)
+            kb_base_x = 30
+            kb_base_y = WINDOW_HEIGHT - 150
+            
+            # Layout: (Symbol, Label, rel_x, rel_y, w, h)
+            keys = [
+                ("↑", "↑", 50, 0, 40, 40),
+                ("←", "←", 5, 45, 40, 40),
+                ("↓", "↓", 50, 45, 40, 40),
+                ("→", "→", 95, 45, 40, 40),
+                ("↵", "ENT", 145, 45, 60, 40),
+                ("␣", "", 5, 90, 130, 30) # Space bar
+            ]
+            
+            for k_sym, k_label, kx, ky, kw, kh in keys:
+                # Calculate Brightness based on activation
+                last_act = key_activations.get(k_sym, 0)
+                time_diff = pygame.time.get_ticks() - last_act
+                
+                brightness = 50 # Default dark grey
+                text_color = (150, 150, 150) # Dim text
+                
+                if time_diff < KEY_FADE_DURATION:
+                    ratio = 1.0 - (time_diff / KEY_FADE_DURATION) # 1.0 -> 0.0
+                    brightness = int(50 + ratio * 205) # 50 -> 255
+                    text_color = (255, 255, 255) if ratio > 0.5 else (200, 200, 200)
+                
+                # Draw Key Rect
+                rect = pygame.Rect(kb_base_x + kx, kb_base_y + ky, kw, kh)
+                pygame.draw.rect(screen, (brightness, brightness, brightness), rect, border_radius=5)
+                pygame.draw.rect(screen, (100, 100, 100), rect, 2, border_radius=5) # Border
+                
+                # Draw Label
+                if k_label:
+                    # Use title_font for arrows/ENT
+                    label_surf = title_font.render(k_label, True, (0, 0, 0) if brightness > 150 else (255, 255, 255))
+                    label_rect = label_surf.get_rect(center=rect.center)
+                    screen.blit(label_surf, label_rect)
+                
+        else:
+            # Placeholder text
+            text = font.render("Waiting for game state...", True, (100, 100, 100))
+            screen.blit(text, (GRID_WIDTH // 2 - 100, WINDOW_HEIGHT // 2))
 
         pygame.display.flip()
         clock.tick(60) # 60 FPS for smoother feedback

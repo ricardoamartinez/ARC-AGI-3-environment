@@ -275,7 +275,8 @@ class PPOAgent(Agent):
         policy_kwargs = dict(
             features_extractor_class=ArcViTFeatureExtractor,
             features_extractor_kwargs=dict(features_dim=256),
-            net_arch=dict(pi=[128, 128], vf=[128, 128]) # MLP heads (Decoder) for Policy and Value
+            net_arch=dict(pi=[128, 128], vf=[128, 128]), # MLP heads (Decoder) for Policy and Value
+            log_std_init=-0.5 # Increased variance (std=0.6) to allow exploring different action buckets
         )
         
         # Check for CUDA
@@ -294,10 +295,10 @@ class PPOAgent(Agent):
             env, 
             verbose=1,
             learning_rate=0.0003,
-            n_steps=128, # Reduced from 256 to speed up updates
-            batch_size=8, # Reduced from 64 to avoid OOM/Freeze with 1:1 Attention
+            n_steps=512, # Increased from 128 for better stability and longer horizon
+            batch_size=64, # Increased from 8 to stabilize gradients (CNN is efficient enough)
             gamma=0.99,
-            ent_coef=0.05,
+            ent_coef=0.005, # Further reduced entropy to discourage random spamming
             policy_kwargs=policy_kwargs,
             device=device
         )

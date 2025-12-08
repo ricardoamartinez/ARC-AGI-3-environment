@@ -23,7 +23,7 @@ class LiveVisualizerCallback(BaseCallback):
         self.sleep_time = 0.0 # Delay in seconds
         
         # Write Queue
-        self.msg_queue = queue.Queue(maxsize=2) # Keep it small to drop old frames
+        self.msg_queue = queue.Queue(maxsize=100) # Increased to prevent dropping action frames at high FPS
         self._writer_thread = threading.Thread(target=self._write_loop, daemon=True)
         self._writer_thread.start()
 

@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import time
 import gymnasium as gym
 import numpy as np
 from typing import Any, Optional, Set, List, Tuple, TYPE_CHECKING
@@ -55,9 +56,9 @@ class ARCGymEnv(gym.Env):
         
         # Physics constants for smooth, momentum-based cursor control
         # The model outputs acceleration; velocity accumulates over time
-        self.acceleration = 1.5  # Force multiplier for model output (Increased for responsiveness)
+        self.acceleration = 0.2  # Force multiplier for model output (Decreased for 100fps)
         self.friction = 0.94     # Velocity retention per step (0.94 = smooth glide, less drag)
-        self.max_velocity = 8.0  # Maximum cursor speed in pixels/step (Increased range)
+        self.max_velocity = 2.0  # Maximum cursor speed in pixels/step (Decreased for 100fps)
 
         # --- DOPAMINE & FOCUS SYSTEM ---
         self.dopamine_level = 0.0 # 0.0 to 1.0
@@ -98,6 +99,11 @@ class ARCGymEnv(gym.Env):
         # Dictionary: {Sequence_Hash -> Sequence_Data}
         self.sequence_registry: dict[str, List[Tuple[str, int, float]]] = {}
         
+        # --- DELAYED CREDIT ASSIGNMENT BUFFER ---
+        # Stores history of significant interactions for manual dopamine attribution.
+        # Format: (Step, ActionIdx, ObjectHash, InvariantHash, GridChanged, Timestamp)
+        self.interaction_history: List[dict] = []
+        
         # Object Tracking State
         self.current_object_idx = 0
 
@@ -113,19 +119,25 @@ class ARCGymEnv(gym.Env):
         )
 
         # Actions: 
-        # We use a Dict space now to support continuous movement + discrete actions?
-        # No, SB3 PPO needs flattening. 
-        # Box(3) -> dx, dy, action_trigger
-        # dx, dy in [-1, 1] -> mapped to cursor acceleration
-        # action_trigger in [-1, 1] -> mapped to discrete actions
+        # Box(4) -> dx, dy, trigger, action_type
+        # dx, dy: Cursor Acceleration [-1, 1]
+        # trigger: Action Execution Strength [-1, 1] (Threshold at 0.5)
+        # action_type: Continuous selection of WHICH action to take [-1, 1]
         
         self.action_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(3,), dtype=np.float32
+            low=-1.0, high=1.0, shape=(4,), dtype=np.float32
         )
         
         # Optimization: Precompute meshgrid for goal channel
         self._xv, self._yv = np.meshgrid(np.linspace(0, 6.28, self.grid_size), np.linspace(0, 6.28, self.grid_size))
         self._cached_goal_channel: Optional[np.ndarray] = None
+        
+        # Anti-Spam State
+        self.consecutive_action_steps = 0
+        self.last_trigger_val = 0.0
+        self.idle_streak = 0
+        self.action_cooldown = 0
+        self.cooldown_steps_after_action = 20 # ~200ms at 100fps
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> tuple[np.ndarray, dict[str, Any]]:
         logger.info("DEBUG: Env Reset Start")
@@ -141,6 +153,7 @@ class ARCGymEnv(gym.Env):
         self.observed_color_transitions.clear()
         self.episode_object_hashes = [] # Clear episode history
         self.sequence_buffer = []
+        self.interaction_history = [] # Clear interaction history
         
         # Keep libraries across resets
         # self.effect_memory.clear() 
@@ -160,6 +173,8 @@ class ARCGymEnv(gym.Env):
         self.last_grid = None
         self.detected_objects = []
         self.current_object_idx = 0
+        self.idle_streak = 0
+        self.action_cooldown = 0
         
         # Reset cursor to center
         self.agent.cursor_x = self.grid_size // 2
@@ -225,15 +240,21 @@ class ARCGymEnv(gym.Env):
 
     def step(self, action_tensor: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         self.current_step += 1
+        if self.action_cooldown > 0:
+            self.action_cooldown -= 1
         
-        # Parse Box Action
-        # action_tensor is shape (3,)
-        # dx, dy are now ACCELERATION (Force)
+        # Parse Box Action (Shape 4)
+        # action_tensor is now (4,)
         ax = float(action_tensor[0])
         ay = float(action_tensor[1])
         trigger = float(action_tensor[2])
+        selection = float(action_tensor[3])
         
         # 1. Continuous Cursor Movement with Physics (Momentum)
+        # Apply Deadzone to prevent "Drift Spam"
+        if abs(ax) < 0.15: ax = 0.0
+        if abs(ay) < 0.15: ay = 0.0
+        
         # The model outputs acceleration (force). Velocity accumulates.
         # This gives the cursor inertia and smooth motion.
         
@@ -277,55 +298,93 @@ class ARCGymEnv(gym.Env):
         if hasattr(self.agent, 'manual_dopamine'):
             self.manual_dopamine = self.agent.manual_dopamine
             
-        # 2. Discrete Action Trigger
-        # The agent controls the cursor. The click happens AT the cursor's location.
-        # We no longer support "teleport clicks" (GameAction with coordinates).
-        # The click action simply means "Click HERE".
+        # 2. Discrete Action Logic
+        # DECOUPLED: Trigger vs Selection
         
-        action_idx = -1 # No action
-        if trigger > 0:
-            # Map 0.0-1.0 to 0-9
-            action_idx = int(trigger * 10.0)
-            action_idx = min(9, max(0, action_idx))
+        # A. Determine WHICH action is selected (continuous -> discrete bucket)
+        # Map [-1, 1] to 0-9 uniform buckets
+        # Size 2.0 / 10 = 0.2 per bucket
+        # -1.0 to -0.8 -> 0
+        # ...
+        # 0.8 to 1.0 -> 9
+        
+        # Normalize to [0, 1]
+        norm_selection = (selection + 1.0) / 2.0
+        norm_selection = max(0.0, min(1.0, norm_selection))
+        
+        # 10 buckets
+        action_idx = int(norm_selection * 10.0)
+        action_idx = min(9, max(0, action_idx))
+        
+        # B. Check Trigger (Gate)
+        # Threshold: 0.6 (Reduced to encourage initial exploration)
+        ACT_THRESHOLD = 0.6
+        
+        should_act = False
+        if trigger > ACT_THRESHOLD and self.action_cooldown == 0:
+            should_act = True
             
-        click_action = False
+        # C. Velocity Constraint (Safety)
+        # Cannot click/act if moving too fast (Stabilize first)
+        current_speed = np.sqrt(self.vel_x**2 + self.vel_y**2)
+        if current_speed > 2.0:
+            should_act = False # Override
         
+        # D. Anti-Spam "Pulse" Logic
+        # We want to penalize holding the button down.
+        # Actions should be discrete presses.
+        # CRITICAL FIX: If holding, force act to FALSE
+        if (trigger > ACT_THRESHOLD) and (self.last_trigger_val > ACT_THRESHOLD):
+            should_act = False # Cannot hold button to spam
+            
+        self.last_trigger_val = trigger
+        
+        # Reset effective action if not acting
+        final_action_idx = action_idx if should_act else -1
+        
+        # Update consecutive counter
+        if final_action_idx != -1:
+            self.consecutive_action_steps += 1
+            self.idle_streak = 0
+            self.action_cooldown = self.cooldown_steps_after_action
+        else:
+            if self.action_cooldown == 0:
+                self.consecutive_action_steps = 0
+            self.idle_streak += 1
+            
         # Mapping:
         # 0-3: CLICK (at current cursor position)
-        # 4: UP (Legacy/Aux)
+        # 4: UP
         # 5: DOWN
         # 6: LEFT
         # 7: RIGHT
         # 8: SPACE
         # 9: ENTER
         
-        if action_idx in [0, 1, 2, 3]: # CLICK
-            click_action = True
-            
+        click_action = False
+        if final_action_idx != -1:
+             if final_action_idx <= 3:
+                 click_action = True
+
         # Determine Game Action
         game_action = None
         
         if click_action: 
             # Use the AGENT'S calculated integer coordinates for the click
-            # The model must have steered the cursor here.
-            # Enforce that the click MUST be at the cursor's location.
-            # We strictly prevent the model from clicking anywhere else.
-            
-            # cx_int, cy_int are the ground truth cursor positions.
             game_action = GameAction.ACTION6
             game_action.set_data({"x": cx_int, "y": cy_int, "game_id": self.agent.game_id})
             
-        elif action_idx == 4: # G-UP
+        elif final_action_idx == 4: # G-UP
             game_action = GameAction.ACTION1
-        elif action_idx == 5: # G-DOWN
+        elif final_action_idx == 5: # G-DOWN
             game_action = GameAction.ACTION2
-        elif action_idx == 6: # G-LEFT
+        elif final_action_idx == 6: # G-LEFT
             game_action = GameAction.ACTION3
-        elif action_idx == 7: # G-RIGHT
+        elif final_action_idx == 7: # G-RIGHT
             game_action = GameAction.ACTION4
-        elif action_idx == 8: # SPACE
+        elif final_action_idx == 8: # SPACE
             game_action = GameAction.ACTION5
-        elif action_idx == 9: # ENTER
+        elif final_action_idx == 9: # ENTER
             game_action = GameAction.ACTION7
 
         
@@ -347,33 +406,82 @@ class ARCGymEnv(gym.Env):
              else:
                  return np.zeros((self.grid_size, self.grid_size, 6), dtype=np.uint8), 0.0, True, False, {}
 
+        # --- HEURISTIC REWARD CALCULATION ---
+        reward = 0.0
+        
         if game_action:
             self.agent.append_frame(frame)
             self.agent.latest_detected_objects = self.detected_objects # Share objects
+            
+            # Add symbols for visualization
+            action_name = game_action.name
+            if final_action_idx == 4: action_name = "UP ↑"
+            elif final_action_idx == 5: action_name = "DOWN ↓"
+            elif final_action_idx == 6: action_name = "LEFT ←"
+            elif final_action_idx == 7: action_name = "RIGHT →"
+            elif final_action_idx == 8: action_name = "SPACE ␣"
+            elif final_action_idx == 9: action_name = "ENTER ↵"
+            elif click_action: action_name = "CLICK 🖱️"
+            
             self.agent._last_action_viz = {
                 "id": game_action.value,
-                "name": game_action.name,
+                "name": action_name,
                 "data": game_action.action_data.model_dump()
             }
         else:
+            status = "Cursor Move"
+            if self.action_cooldown > 0:
+                status = "Cooldown..."
+                # Add penalty for spamming while in cooldown
+                if trigger > ACT_THRESHOLD:
+                    reward -= 1.0 # Use accumulated reward (init at 0.0 above)
+                    self.action_cooldown += 2 # Add more delay to punish spamming
+            
+            elif trigger > 0.2: 
+                status = f"Aiming ({action_idx})..."
+            
             self.agent._last_action_viz = {
-                "name": "Cursor Move",
+                "name": status,
                 "data": {"x": self.agent.cursor_x, "y": self.agent.cursor_y}
             }
 
         obs = self._process_frame(frame)
         
-        # --- HEURISTIC REWARD CALCULATION ---
-        reward = 0.0
+        sparsity_multiplier = 1.0 / (1.0 + self.consecutive_action_steps)
         
         # Continuous Movement Penalty (Energy Cost)
-        # Small penalty for high velocity to encourage efficiency
         reward -= (abs(ax) + abs(ay)) * 0.01
         
+        # TENSION / URGE PENALTY (Bias towards Idle)
+        # Even if not acting, high trigger value is "stressful" and costs energy.
+        # This forces the agent to keep trigger negative (relaxed) when not using it.
+        reward -= max(0.0, trigger) * 0.5
+        
+        # if cooldown_trigger_tension:
+        #    reward -= 2.0
+        #    self.dopamine_level = max(0.0, self.dopamine_level - 0.2)
+        
+        # ACTION COSTS & PENALTIES
+        if final_action_idx != -1:
+             # Base Sparsity Cost: "It costs energy to act."
+             # Reduced from 5.0 to 2.0 to make acting less prohibitive
+             reward -= 2.0
+             
+             # Consecutive Action Penalty (Anti-Spam/Machine Gun)
+             # We want discrete taps, not holding the button.
+             if self.consecutive_action_steps > 1:
+                 reward -= 10.0 * self.consecutive_action_steps # Scaling punishment
+                 # Kill dopamine if spamming
+                 self.dopamine_level = 0.0
+        else:
+            # Idle Reward (Small relaxation bonus)
+            # If we are effectively idling (trigger low), give a small drip of reward.
+            # This makes "doing nothing" better than "doing something useless".
+            if trigger < 0.0:
+                idle_bonus = 0.1 + min(1.0, self.idle_streak * 0.002)
+                reward += idle_bonus
+        
         # 0. Time/Step Loss (Linear Accumulation)
-        # "Per step loss accumulation should increase linearly"
-        # We punish taking too long. The penalty grows as the episode progresses.
-        # Step 1: -0.01, Step 50: -0.50, Step 100: -1.0
         time_penalty = -0.01 * self.current_step
         reward += time_penalty
         
@@ -427,12 +535,132 @@ class ARCGymEnv(gym.Env):
                         effect_reward = -0.5 # Punish creating noise
                         self.dopamine_level = max(0.0, self.dopamine_level - 0.2)
             
-            # B. Apply Rewards
-            # Include Manual Dopamine as Teacher Signal
-            # Reward = Intrinsic + (Manual * Scale)
-            reward += effect_reward
+            # --- IDENTIFY CLICKED OBJECT (Moved Early) ---
+            clicked_obj_hash = "none"
+            clicked_obj_invariant = "none"
+            
+            if click_action:
+                # Find which OBJECT we clicked on (if any)
+                # We use self.detected_objects from the PREVIOUS step (what was there before click)
+                cx_int = int(max(0, min(self.grid_size - 1, self.agent.cursor_x)))
+                cy_int = int(max(0, min(self.grid_size - 1, self.agent.cursor_y)))
+                
+                if 0 <= cy_int < self.grid_size and 0 <= cx_int < self.grid_size:
+                    for obj in self.detected_objects:
+                        if (cy_int, cx_int) in obj:
+                             sorted_pixels = sorted(obj)
+                             # We need the color from the LAST grid (before change)
+                             if self.last_grid is not None:
+                                 r, c = obj[0]
+                                 color = self.last_grid[r, c]
+                                 # 1. Instance Hash (Exact position)
+                                 clicked_obj_hash = hashlib.md5(f"{color}_{str(sorted_pixels)}".encode()).hexdigest()
+                                 
+                                 # 2. Invariant Hash (Generalization: Color + Normalized Shape)
+                                 # Normalize coordinates to top-left of object
+                                 min_r = min(p[0] for p in obj)
+                                 min_c = min(p[1] for p in obj)
+                                 norm_pixels = sorted([(p[0]-min_r, p[1]-min_c) for p in obj])
+                                 clicked_obj_invariant = hashlib.md5(f"{color}_{str(norm_pixels)}".encode()).hexdigest()
+                             break
+
+            # --- UPDATE INTERACTION HISTORY ---
+            # Record any significant action (Click or Game Action)
+            # We want to be able to look back and say "Ah, THAT was the good action"
+            if click_action or action_idx >= 4:
+                self.interaction_history.append({
+                    "step": self.current_step,
+                    "action": action_idx,
+                    "object_hash": clicked_obj_hash,
+                    "invariant_hash": clicked_obj_invariant,
+                    "grid_changed": grid_changed_flag,
+                    "time": time.time()
+                })
+                # Keep buffer manageable
+                if len(self.interaction_history) > 20:
+                    self.interaction_history.pop(0)
+
+            # REFACTOR: If we get manual dopamine, LOCK IN on this behavior.
+            # The human likes this!
+            # Initialize target variables to None before checking
+            target_action = None
+            target_obj = None
+            target_invariant = None
+            
             if self.manual_dopamine > 0.1:
-                reward += self.manual_dopamine * 100.0 # OVERWHELMING SIGNAL (was 5.0)
+                # HUGE reward for satisfying the human
+                reward += self.manual_dopamine * 50.0 
+                
+                # --- DELAYED CREDIT ASSIGNMENT (SMARTER) ---
+                # Search backwards for the "Cause" of this dopamine.
+                # We use an eligibility trace with time decay.
+                
+                best_match = None
+                best_match_score = -1.0
+                
+                # We look back up to 20 steps (approx 2-5 seconds)
+                for i, event in enumerate(reversed(self.interaction_history)):
+                    # Decay factor based on how long ago it happened
+                    # (Recent events are more likely the cause, but reaction time implies a slight delay)
+                    steps_ago = self.current_step - event["step"]
+                    
+                    # Human reaction time heuristic: Peak relevance is ~0.5s - 1.0s ago (approx 2-5 steps)
+                    # We use a skewed bell curve or just simple exponential decay from a delayed peak?
+                    # Let's use simple decay for now, but prioritize "Change" events.
+                    
+                    relevance = 1.0 / (1.0 + steps_ago * 0.2)
+                    
+                    score = 0.0
+                    if event["grid_changed"]:
+                        score += 5.0 # Highest priority: It actually DID something
+                    elif event["object_hash"] != "none":
+                        score += 2.0 # Medium priority: It touched something
+                    else:
+                        score += 0.5 # Low priority: Just an action
+                        
+                    final_score = score * relevance
+                    
+                    if final_score > best_match_score:
+                        best_match_score = final_score
+                        best_match = event
+                
+                # If no specific event found, use current (fallback)
+                if best_match:
+                    target_action = best_match["action"]
+                    target_obj = best_match["object_hash"]
+                    target_invariant = best_match.get("invariant_hash", "none")
+                elif click_action and clicked_obj_hash != "none":
+                    target_action = action_idx
+                    target_obj = clicked_obj_hash
+                    target_invariant = clicked_obj_invariant
+                elif final_action_idx == -1:
+                    # User rewarded SILENCE/IDLE.
+                    target_action = -1
+                    target_obj = "none"
+                    target_invariant = "none"
+                
+                if target_action is not None:
+                     # Use Invariant Hash if available for generalization
+                     # This effectively says "Clicking RED SQUARES is good", not just "Clicking THIS pixel"
+                     lock_target = target_invariant if target_invariant != "none" else target_obj
+                     
+                     # Allow locking to "none" for Idle
+                     if lock_target != "none" or target_action == -1:
+                         # INTRINSICALLY CONDITIONED REWARD
+                         # If we are locked in, and we repeat the action, give INTERNAL reward.
+                         
+                         self.locked_plan = (target_action, lock_target)
+                         self.plan_confidence = 1.0
+                         # Boost dopamine level to sustain focus
+                         self.dopamine_level = 1.0
+                         
+                         # REINFORCE THE PAST EVENT
+                         # Store value on INVARIANT hash to allow generalization
+                         if lock_target in self.valuable_object_hashes:
+                             self.valuable_object_hashes[lock_target] += 5.0 # Mark object TYPE as VERY valuable
+                         else:
+                             self.valuable_object_hashes[lock_target] = 5.0
+
             
             # C. "Flow State" Bonus
             # If dopamine is high, reward actions near the Focus Map
@@ -441,95 +669,143 @@ class ARCGymEnv(gym.Env):
                 cx_int = int(max(0, min(self.grid_size - 1, self.agent.cursor_x)))
                 cy_int = int(max(0, min(self.grid_size - 1, self.agent.cursor_y)))
                 
+                # REFACTOR: "Deliberate Action" Reward
+                # If the agent is in a high dopamine state (excited/focused) AND it takes a valid action...
+                # ...we reward it for "Following Through".
+                # But we PUNISH it heavily for "Breaking Flow" (clicking elsewhere).
+                
                 if 0 <= cy_int < self.grid_size and 0 <= cx_int < self.grid_size:
                     focus_val = self.focus_map[cy_int, cx_int]
-                    if focus_val > 0.5: # Needs to be VERY focal
-                        # "Sticking with it" Reward
-                        reward += 2.0 * self.dopamine_level # Higher reward for focus
+                    
+                    if click_action:
+                        if focus_val > 0.5: 
+                            # "You clicked where you were looking!" -> GOOD
+                            reward += 5.0 
+                        else:
+                            # "You clicked random noise while excited about something else!" -> BAD
+                            reward -= 5.0 # Stop being distracted!
+                            self.dopamine_level *= 0.5 # Lose focus immediately
+                    elif focus_val > 0.5:
+                         # Just hovering over interesting stuff is good
+                         reward += 0.5 * self.dopamine_level
             
             # D. Penalty for Boring/Null Actions
-            if click_action and effect_reward == 0.0:
-                reward -= 1.0 # Wasting clicks
-                self.dopamine_level = max(0.0, self.dopamine_level - 0.2) # Boredom
+            # INTRINSIC PENALTY FOR SPAM / INEFFECTIVE ACTIONS
+            # "Energy Cost" for action vs "Value" of outcome.
+            
+            if click_action:
+                if effect_reward <= 0.0:
+                    # Action had NO positive effect.
+                    # Was it just a "miss" or "spam"?
+                    
+                    # 1. Dynamic Spam Penalty (Ratio based)
+                    # Instead of hardcoded "3 in a row", we track local effectiveness.
+                    if len(self.recent_actions) > 5:
+                        recent_clicks = [a for a in self.recent_actions[-10:] if a <= 3] # Count clicks
+                        if len(recent_clicks) > 5:
+                             # If we are clicking a lot...
+                             # We need to know if we are achieving anything.
+                             # This requires tracking recent *successes* which we don't have easily in this block.
+                             # Fallback to local repetition check but slightly looser.
+                             
+                             if self.recent_actions[-1] == action_idx and self.recent_actions[-2] == action_idx:
+                                  # STILL PUNISH MANIC REPETITION (Even 2 in a row if ineffective is bad)
+                                  reward -= 5.0 
+                                  self.dopamine_level = 0.0
+                    
+                    reward -= 2.0 # Standard "Waste of Energy" penalty
                 
                 # Plan Failure?
-                if self.locked_plan:
-                    # If we tried the locked plan and it failed, weaken confidence
-                    self.plan_confidence -= 0.2
+                if self.locked_plan and effect_reward <= 0.0:
+                     # If we tried the locked plan and it failed, weaken confidence
+                    self.plan_confidence -= 0.1 # Slower decay
                     if self.plan_confidence <= 0:
                         self.locked_plan = None # Abandon plan
-            
-            elif action_idx in [4, 5, 6, 7, 8, 9] and effect_reward == 0.0:
-                 # Moving cursor without clicking is neutral, but pressing buttons with no effect is bad
-                 if action_idx >= 8: # Space/Enter
-                     reward -= 0.5
 
+            elif action_idx in [4, 5, 6, 7, 8, 9] and effect_reward == 0.0:
+                 # Moving cursor without clicking is neutral-ish (energy cost handled above),
+                 # but pressing buttons (Space/Enter) with no effect is bad.
+                 if action_idx >= 8: # Space/Enter
+                     reward -= 2.0
+            
+            # REFACTOR: Remove hardcoded repetition check below in favor of above logic?
+            # Keeping the "loop" check as a fail-safe.
+            
             # E. Scientific Discovery (Rule Repetition)
             # If we did Action X on Object O and got Effect Z... and we do it AGAIN...
             # That's a huge signal that we found a mechanism.
             
-            clicked_obj_hash = "none" # Default
+            # clicked_obj_hash was calculated early above
             
             if diff_mask is not None and click_action and grid_changed_flag:
-                # Identify Target (What was under cursor BEFORE change?)
-                # We need self.last_grid for this
-                cx_int = int(max(0, min(self.grid_size - 1, self.agent.cursor_x)))
-                cy_int = int(max(0, min(self.grid_size - 1, self.agent.cursor_y)))
+                # Identify Effect Hash (Shape + New Color)
+                effect_vals = current_grid[diff_mask]
+                effect_hash = hashlib.md5(effect_vals.tobytes()).hexdigest()
                 
-                if 0 <= cy_int < self.grid_size and 0 <= cx_int < self.grid_size:
+                key = (action_idx, clicked_obj_hash)
+                
+                if key not in self.effect_memory:
+                    self.effect_memory[key] = set()
+                
+                if effect_hash in self.effect_memory[key]:
+                    # WE FOUND A REPEATABLE RULE!
+                    reward += 5.0 # Eureka moment
+                    self.dopamine_level = 1.0 # MAX DOPAMINE
                     
-                    # Find which OBJECT we clicked on (if any)
-                    clicked_obj_hash = "space"
-                    current_obj_raw = None
+                    # LOCK PLAN
+                    # We found something that works. Stick to it!
+                    self.locked_plan = (action_idx, clicked_obj_hash)
+                    self.plan_confidence = 1.0
                     
-                    for obj in self.detected_objects: # Objects from PREVIOUS frame
-                        if (cy_int, cx_int) in obj:
-                             current_obj_raw = obj
-                             sorted_pixels = sorted(obj)
-                             r, c = obj[0]
-                             color = self.last_grid[r, c]
-                             clicked_obj_hash = hashlib.md5(f"{color}_{str(sorted_pixels)}".encode()).hexdigest()
-                             break
-                    
-                    # Identify Effect Hash (Shape + New Color)
-                    effect_vals = current_grid[diff_mask]
-                    effect_hash = hashlib.md5(effect_vals.tobytes()).hexdigest()
-                    
-                    key = (action_idx, clicked_obj_hash)
-                    
-                    if key not in self.effect_memory:
-                        self.effect_memory[key] = set()
-                    
-                    if effect_hash in self.effect_memory[key]:
-                        # WE FOUND A REPEATABLE RULE!
-                        reward += 5.0 # Eureka moment
-                        self.dopamine_level = 1.0 # MAX DOPAMINE
-                        
-                        # LOCK PLAN
-                        # We found something that works. Stick to it!
-                        self.locked_plan = (action_idx, clicked_obj_hash)
-                        self.plan_confidence = 1.0
-                        
-                    else:
-                        self.effect_memory[key].add(effect_hash)
+                else:
+                    self.effect_memory[key].add(effect_hash)
             
             # F. Plan Persistence Penalty
             # If we have a locked plan, and we do something else, punish heavily.
             if self.locked_plan:
-                target_action, target_obj_hash = self.locked_plan
+                target_action, target_invariant_hash = self.locked_plan
                 
                 # Check if we are following the plan
                 is_following = False
-                if action_idx == target_action:
-                    # Check if we are targeting the right object type
-                    # This is hard to check perfectly without full oracle, but we can check if we are clicking *an* object
-                    if click_action:
-                         # Check if current object matches hash?
-                         # Hash changes if position changes. We need a looser "Object Type" hash (Color + Size + Shape, invariant to Pos)
-                         pass 
-                    is_following = True # Assume action match is enough for now
                 
-                if not is_following:
+                # Allow minor variations in action type (e.g. Action 0 vs 1 if they are both clicks)
+                is_click_plan = target_action >= 0 and target_action <= 3
+                is_click_action = action_idx >= 0 and action_idx <= 3
+                
+                action_match = False
+                if target_action == -1:
+                    # Plan is to IDLE
+                    if final_action_idx == -1:
+                        action_match = True
+                else:
+                    # Plan is an ACTION
+                    # We only match if we ACTUALLY ACTED (final_action_idx != -1)
+                    if final_action_idx != -1:
+                         # Check if indices match (or generalized click match)
+                         if action_idx == target_action:
+                             action_match = True
+                         elif is_click_plan and is_click_action:
+                             action_match = True
+                
+                if action_match:
+                    if is_click_action and target_action != -1:
+                         # Check object match using INVARIANT hash
+                         # We calculated clicked_obj_invariant earlier
+                         # If the plan was locked to "none" (empty space), check that too
+                         if clicked_obj_invariant == target_invariant_hash:
+                             is_following = True
+                         elif clicked_obj_hash == target_invariant_hash: # Fallback to instance hash
+                             is_following = True
+                    else:
+                        is_following = True
+                
+                if is_following:
+                     # REWARD FOR REPETITION (The "Quick Learner" Reward)
+                     # If we are following the locked plan, give a small internal boost
+                     # This effectively makes the agent "want" to repeat the successful behavior
+                     reward += 2.0 
+                     self.dopamine_level = min(1.0, self.dopamine_level + 0.1) # Sustain focus
+                else:
                     reward -= 2.0 # distracted!
             
             # G. Sequence & Trend Learning (Neuro-symbolic)
@@ -620,8 +896,8 @@ class ARCGymEnv(gym.Env):
             visit_count = self.state_visitation_counts.get(state_hash, 0) + 1
             self.state_visitation_counts[state_hash] = visit_count
             
-            curiosity_reward = 2.0 / np.sqrt(visit_count) # Reduced base curiosity in favor of Dopamine
-            reward += curiosity_reward
+            curiosity_reward = 0.5 / np.sqrt(visit_count) # Reduced base curiosity in favor of Dopamine/Sparsity
+            reward += curiosity_reward * sparsity_multiplier
             
             # Check for Novelty (New State in THIS episode)
             if state_hash not in self.visited_hashes:
@@ -748,24 +1024,36 @@ class ARCGymEnv(gym.Env):
             # NEW: Punishment for Ineffective Clicks
             # If the agent clicked (Actions 0-3) and the grid did NOT change, punish it.
             if click_action and not grid_changed_flag:
-                reward -= 2.0
+                reward -= 5.0 # Increased penalty for clicking nothing (Total -7.0 with sparsity)
+            
+            # Reduce penalty for non-click actions to encourage exploration
+            elif final_action_idx in [4, 5, 6, 7, 8, 9] and not grid_changed_flag:
+                 # Huge refund on sparsity cost for trying new buttons
+                 # We want the agent to try these at least once!
+                 # Sparsity is -2.0. Refund +1.8 = Net -0.2 (almost free)
+                 reward += 1.8 
             
             # --- STATE-ACTION CURIOSITY (Conditional Branching) ---
             # "Unlock novel paths": Try every action at least once from every state.
             # "Bias towards good attempts": If we are in a rare/good state, exploring from it is highly rewarded.
             
-            sa_pair = (state_hash, action_idx)
+            # Use final_action_idx (only reward executed actions)
+            effective_sa_idx = final_action_idx
+            if final_action_idx <= 3 and final_action_idx != -1:
+                effective_sa_idx = 99 # Unify clicks
+            
+            sa_pair = (state_hash, effective_sa_idx)
             sa_count = self.state_action_counts.get(sa_pair, 0)
             self.state_action_counts[sa_pair] = sa_count + 1
             
             # Reward decreases as we repeat the same action in the same state.
-            # R = 3.0 / (1 + count)
-            # 1st time: +3.0
-            # 2nd time: +1.5
-            # 3rd time: +1.0
+            # R = 5.0 / (1 + count) (Balanced: 5.0 - 2.0 = +3.0 initial profit)
+            # 1st time: +5.0
+            # 2nd time: +2.5 (Net +0.5)
+            # 3rd time: +1.6 (Net -0.4) -> Stops repeating here
             # ...
             # This forces the agent to "branch out" (try other actions) before repeating.
-            sa_reward = 3.0 / (1.0 + sa_count)
+            sa_reward = 5.0 / (1.0 + sa_count)
             
             # Bias: If this state itself is RARE (a "good attempt" or deep state), boost the exploration reward.
             # We want to explore thoroughly when we find something new.
@@ -773,7 +1061,9 @@ class ARCGymEnv(gym.Env):
             if visit_count < 5: # We've been here fewer than 5 times
                 state_rarity_boost = 2.0
             
-            reward += sa_reward * state_rarity_boost
+            # Only give curiosity reward if we actually DID something (or if idle is rare)
+            # If we are just idling, we don't need a huge boost, but it's okay to reward staying still if it's new.
+            reward += sa_reward * state_rarity_boost * sparsity_multiplier
 
             # --- COLOR INTERACTION CURIOSITY (Action Curiosity) ---
             # Reward applying specific actions to specific colors for the first time
@@ -791,13 +1081,13 @@ class ARCGymEnv(gym.Env):
             # Only track for "active" actions (Click, Arrows, Space, Enter)
             # Indices: 0-3 (Click variations), 4-9 (Game Actions)
             # We simplify 0-3 to just "Click" (Action 4 conceptually) for color pairing
-            effective_action = action_idx
-            if action_idx <= 3: 
+            effective_action = final_action_idx
+            if final_action_idx <= 3 and final_action_idx != -1: 
                 effective_action = 99 # Special ID for "Any Click"
                 
             action_color_pair = (effective_action, cursor_color)
             
-            if action_color_pair not in self.interacted_color_actions:
+            if final_action_idx != -1 and action_color_pair not in self.interacted_color_actions:
                 reward += 1.5 # Reward for trying this action on this color for the first time
                 self.interacted_color_actions.add(action_color_pair)
 
@@ -817,7 +1107,8 @@ class ARCGymEnv(gym.Env):
             "dopamine": self.predicted_dopamine, # Show LEARNED prediction, not heuristic
             "manual_dopamine": self.manual_dopamine,
             "plan_confidence": self.plan_confidence,
-            "reward": reward
+            "reward": reward,
+            "trigger": float(trigger) # Show the raw urge/tension
         }
 
         return obs, reward, terminated, truncated, metrics
@@ -860,11 +1151,28 @@ class ARCGymEnv(gym.Env):
         
         # Add static object borders to Focus Channel so the agent still sees objects
         for obj in self.detected_objects:
+             # Calculate Invariant Hash for this object
+            r0, c0 = obj[0]
+            color = current[r0, c0]
+            min_r = min(p[0] for p in obj)
+            min_c = min(p[1] for p in obj)
+            norm_pixels = sorted([(p[0]-min_r, p[1]-min_c) for p in obj])
+            h_inv = hashlib.md5(f"{color}_{str(norm_pixels)}".encode()).hexdigest()
+            
+            is_valuable = False
+            if h_inv in self.valuable_object_hashes:
+                 # If value > threshold, treat as high focus
+                 if self.valuable_object_hashes[h_inv] > 1.0:
+                     is_valuable = True
+            
+            base_intensity = 150 if is_valuable else 50
+            
             for r, c in obj:
                 if r < self.grid_size and c < self.grid_size:
                     # If it's not already hot from dopamine, give it a baseline glow
-                    if focus_channel[r, c] < 50:
-                        focus_channel[r, c] = 50
+                    # If valuable, give it a STRONGER glow
+                    if focus_channel[r, c] < base_intensity:
+                        focus_channel[r, c] = base_intensity
         
         # Draw Cursor Brightly (Always Max Importance)
         # Ensure integer indices
@@ -891,31 +1199,45 @@ class ARCGymEnv(gym.Env):
                     if focus_channel[py, px] < 200:
                         focus_channel[py, px] = 200
         
-        # --- VISUAL CHEAT SHEET (Picbreeder Hint) ---
-        # If we have a locked plan or known behavior, highlight the target!
-        if self.locked_plan:
-            _, target_obj_hash = self.locked_plan
-            # Find the object corresponding to this hash in current detections
-            # This is expensive but necessary for "Immediate Matching"
-            # We need to scan current objects and hash them
-            
-            # Optimization: detected_objects is already computed if grid changed.
-            # But we need 'current_grid' to compute color for hash.
-            # 'current' channel 0 is the grid.
-            
-            for obj in self.detected_objects:
-                if not obj: continue
-                r0, c0 = obj[0]
-                color = current[r0, c0]
-                sorted_pixels = sorted(obj)
-                # Hash must match exactly what we stored
-                h = hashlib.md5(f"{color}_{str(sorted_pixels)}".encode()).hexdigest()
+            # --- VISUAL CHEAT SHEET (Picbreeder Hint) ---
+            # If we have a locked plan or known behavior, highlight the target!
+            if self.locked_plan:
+                _, target_hash = self.locked_plan
                 
-                if h == target_obj_hash:
-                    # FOUND IT! Light it up!
-                    for r, c in obj:
-                        focus_channel[r, c] = 255 # Max Focus
-                    break
+                # Check current objects for match
+                # Use INVARIANT hash matching if possible
+                
+                # We need to re-scan current objects for invariance
+                # Optimization: do this as part of the focus update logic?
+                # For now, let's do it here.
+                
+                # `current` is defined above as current_grid's shorter name, but `current_grid` variable name is not present in scope.
+                # `current` holds the extracted grid data.
+                if current is not None:
+                     # Re-find components for current frame if not already (process_frame called after update)
+                     # But detected_objects is updated in step().
+                     
+                     for obj in self.detected_objects:
+                        if not obj: continue
+                        r0, c0 = obj[0]
+                        color = current[r0, c0]
+                        
+                        # 1. Strict Hash
+                        sorted_pixels = sorted(obj)
+                        h_strict = hashlib.md5(f"{color}_{str(sorted_pixels)}".encode()).hexdigest()
+                        
+                        # 2. Invariant Hash
+                        min_r = min(p[0] for p in obj)
+                        min_c = min(p[1] for p in obj)
+                        norm_pixels = sorted([(p[0]-min_r, p[1]-min_c) for p in obj])
+                        h_inv = hashlib.md5(f"{color}_{str(norm_pixels)}".encode()).hexdigest()
+                        
+                        # Match EITHER
+                        if h_strict == target_hash or h_inv == target_hash:
+                             # FOUND IT! Light it up!
+                            for r, c in obj:
+                                focus_channel[r, c] = 255 # Max Focus
+
             
         # --- ATTENTION GATING ---
         # If Dopamine is high, DIM everything that isn't in focus
