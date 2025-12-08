@@ -7,6 +7,7 @@ import os
 import threading
 from typing import Any, Optional, Set, List, Tuple
 
+import torch
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
@@ -180,6 +181,8 @@ class PPOAgent(Agent):
         self.cursor_y = 32
         self._quit_event = threading.Event()
         self._gui_reader_thread = None
+        self.training_speed = 0.0 # 0.0 (Fast) to 1.0 (Slow)
+        self.manual_dopamine = 0.0 # Shared state
         self._start_gui()
 
     def _start_gui(self):
@@ -219,6 +222,11 @@ class PPOAgent(Agent):
                                     logger.info("Quit signal received from GUI")
                                     self._quit_event.set()
                                     break
+                                elif data.get("action") == "SET_SPEED":
+                                    speed = float(data.get("value", 0.0))
+                                    self.training_speed = max(0.0, min(1.0, speed))
+                                elif data.get("action") == "SET_MANUAL_DOPAMINE":
+                                    self.manual_dopamine = float(data.get("value", 0.0))
                             except json.JSONDecodeError:
                                 pass
                         except Exception as e:
@@ -270,17 +278,28 @@ class PPOAgent(Agent):
             net_arch=dict(pi=[128, 128], vf=[128, 128]) # MLP heads (Decoder) for Policy and Value
         )
         
+        # Check for CUDA
+        device = "auto"
+        if torch.cuda.is_available():
+            logger.info(f"CUDA is available. Using GPU: {torch.cuda.get_device_name(0)}")
+            device = "cuda"
+        else:
+            logger.warning("CUDA is NOT available. Training will be slow on CPU.")
+            logger.warning("To enable GPU acceleration, please install a CUDA-compatible PyTorch version.")
+            device = "cpu"
+
         # Create Model
         self.model = PPO(
             "CnnPolicy", 
             env, 
             verbose=1,
             learning_rate=0.0003,
-            n_steps=256,
-            batch_size=64,
+            n_steps=128, # Reduced from 256 to speed up updates
+            batch_size=8, # Reduced from 64 to avoid OOM/Freeze with 1:1 Attention
             gamma=0.99,
             ent_coef=0.05,
             policy_kwargs=policy_kwargs,
+            device=device
         )
         
         # Train

@@ -62,8 +62,13 @@ class Agent(ABC):
         self._cleanup = True
         if record:
             self.start_recording()
+        # API Key: Use env var if valid, otherwise use provided default
+        _api_key = os.getenv("ARC_API_KEY", "")
+        if not _api_key or _api_key.startswith("your_"):
+            _api_key = "894cb2d9-45a5-4897-91e8-f03d7d4a1f8a"
+        
         self.headers = {
-            "X-API-Key": os.getenv("ARC_API_KEY", ""),
+            "X-API-Key": _api_key,
             "Accept": "application/json",
         }
         # Reuse session

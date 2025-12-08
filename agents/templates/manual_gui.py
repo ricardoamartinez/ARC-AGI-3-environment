@@ -53,12 +53,10 @@ def main():
     root.bind("Q", lambda e: send_action("QUIT"))
 
     def on_click(event):
-        # Action 6
-        scale = current_state["scale"]
-        grid_x = event.x // scale
-        grid_y = event.y // scale
-        if 0 <= grid_x <= 63 and 0 <= grid_y <= 63:
-            send_action("ACTION6", data={"game_id": current_state["game_id"], "x": grid_x, "y": grid_y})
+        # Action 6 (Click)
+        # REFACTOR: We no longer send coordinates. We just send "CLICK".
+        # The agent/environment must decide WHERE the click happens (based on cursor).
+        send_action("ACTION6")
 
     canvas.bind("<Button-1>", on_click)
     

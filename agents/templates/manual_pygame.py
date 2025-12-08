@@ -16,7 +16,7 @@ def main():
     # Constants
     SCALE_FACTOR = 1 # Initial scale, will update dynamically
     SIDEBAR_WIDTH = 300
-    WINDOW_HEIGHT = 800
+    WINDOW_HEIGHT = 1000 # Increased height
     GRID_WIDTH = 800 # Default start
     WINDOW_WIDTH = GRID_WIDTH + SIDEBAR_WIDTH
     
@@ -42,12 +42,18 @@ def main():
     game_select_mode = False
     available_games = [] # List of {"game_id": str, "title": str}
     
+    # Heatmap State
+    current_attention_map = None # 64x64 list of lists
+    current_objects = [] # List of list of (r, c)
+    show_heatmap = False
+    
     last_action_info = None
     last_click_pos = None
     last_click_time = 0
     CLICK_VIS_DURATION = 500 # ms
     
-    cursor_pos = None # (x, y)
+    cursor_pos = None # (x, y) target
+    visual_cursor_pos = None # (x, y) current interpolated
     
     # Colors
     BG_COLOR = (0, 0, 0)
@@ -89,6 +95,21 @@ def main():
         0: "RESET"
     }
 
+    # Metrics History
+    metrics_history = {
+        "reward": [],
+        "dopamine": [],
+        "confidence": [],
+        "manual_dopamine": []
+    }
+    MAX_HISTORY = 200
+    
+    # Speed Slider & Manual Dopamine
+    speed_val = 0.0 
+    manual_dopamine_val = 0.0 # 0.0 to 1.0, controlled by 'D' key
+    dragging_slider = False
+    holding_d_key = False
+    
     running = True
     
     def send_action(action_name, **kwargs):
@@ -143,29 +164,91 @@ def main():
                     send_action("ACTION7")
                 elif event.key == pygame.K_r:
                     send_action("RESET")
+                elif event.key == pygame.K_h:
+                    show_heatmap = not show_heatmap
+                elif event.key == pygame.K_d:
+                    holding_d_key = True
                 elif event.key == pygame.K_q:
                     send_action("QUIT")
                     running = False
             
+            elif event.type == pygame.KEYUP:
+                if event.key == pygame.K_d:
+                    holding_d_key = False
+            
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1: # Left click
                     x, y = event.pos
+                    
+                    # Calculate dynamic positions again for hit testing
+                    graph_start_y = y_offset + 20
+                    min_slider_y = graph_start_y + 360
+                    slider_y = min(WINDOW_HEIGHT - 60, max(WINDOW_HEIGHT - 80, min_slider_y))
+                    
+                    slider_x = GRID_WIDTH + 20
+                    slider_w = SIDEBAR_WIDTH - 40
+                    slider_h = 20
+                    
+                    # Check Slider
+                    slider_rect = pygame.Rect(slider_x, slider_y, slider_w, slider_h)
+                    if slider_rect.inflate(10, 10).collidepoint(x, y):
+                        dragging_slider = True
+                        ratio = (x - slider_x) / slider_w
+                        speed_val = max(0.0, min(1.0, ratio))
+                        send_action("SET_SPEED", value=speed_val)
+                    
+                    # Check Dopamine Button
+                    btn_y = slider_y - 50
+                    btn_h = 40
+                    btn_rect = pygame.Rect(slider_x, btn_y, slider_w, btn_h)
+                    if btn_rect.collidepoint(x, y):
+                        holding_d_key = True
+                    
                     # Check if click is in grid area
-                    if x < GRID_WIDTH:
-                        grid_x = x // SCALE_FACTOR
-                        grid_y = y // SCALE_FACTOR
-                        # Assume max 63 for safety, but grid bounds are better
-                        max_x = 63
-                        max_y = 63
-                        if current_grids and len(current_grids) > 0:
-                             # Use current frame dimensions
-                            curr = current_grids[current_grid_idx]
-                            max_y = len(curr)
-                            max_x = len(curr[0])
-                            
-                        if 0 <= grid_x < max_x and 0 <= grid_y < max_y:
-                            waiting_for_server = True
-                            send_action("ACTION6", data={"game_id": game_id, "x": grid_x, "y": grid_y})
+                    elif x < GRID_WIDTH:
+                        # During training, the MODEL controls the cursor and clicks.
+                        # Human clicks on the grid are ignored - this is just a visualizer.
+                        # The model steers the cursor via acceleration output and triggers clicks.
+                        pass
+
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    dragging_slider = False
+                    if holding_d_key: # Release button
+                        holding_d_key = False
+            
+            elif event.type == pygame.MOUSEMOTION:
+                if dragging_slider:
+                    x, y = event.pos
+                    slider_x = GRID_WIDTH + 20
+                    slider_w = SIDEBAR_WIDTH - 40
+                    
+                    ratio = (x - slider_x) / slider_w
+                    speed_val = max(0.0, min(1.0, ratio))
+                    send_action("SET_SPEED", value=speed_val)
+
+        # Manual Dopamine Logic
+        # Gradual release: Slower rise/fall
+        if holding_d_key:
+            manual_dopamine_val = min(1.0, manual_dopamine_val + 0.01) # Slower rise (was 0.05)
+        else:
+            manual_dopamine_val = max(0.0, manual_dopamine_val - 0.01) # Slower decay
+            
+        if abs(manual_dopamine_val) > 0.001 or holding_d_key:
+             # Send update if value is significant or changing
+             # We piggyback on any action or just send dedicated update?
+             # Better to send dedicated update, but don't flood.
+             # Actually, we can send it alongside other messages or sparsely.
+             # Let's send it every frame? No, too heavy.
+             # Send only on change?
+             pass
+        
+        # To keep it simple, we send it via SET_MANUAL_DOPAMINE if changed
+        # We need a 'last_sent_dopamine' check
+        if 'last_sent_dopamine' not in locals(): last_sent_dopamine = -1
+        if abs(manual_dopamine_val - last_sent_dopamine) > 0.01:
+            send_action("SET_MANUAL_DOPAMINE", value=manual_dopamine_val)
+            last_sent_dopamine = manual_dopamine_val
 
         # Process incoming messages
         # Consume ALL messages in queue to catch up to latest state
@@ -184,6 +267,10 @@ def main():
                         if aid == 6 or (adata and "x" in adata and "y" in adata):
                             last_click_pos = (adata.get("x", 0), adata.get("y", 0))
                             last_click_time = pygame.time.get_ticks()
+                            
+                            # Do NOT snap visual cursor. 
+                            # The cursor should continue its smooth trajectory.
+                            # The click visualization will appear at last_click_pos.
                         else:
                             # Reset click if a move action happens? Or keep it?
                             # Keep it to show history briefly
@@ -196,7 +283,28 @@ def main():
                 if "state" in data:
                     state = data["state"]
                 if "cursor" in data:
-                    cursor_pos = (data["cursor"]["x"], data["cursor"]["y"])
+                    target = (data["cursor"]["x"], data["cursor"]["y"])
+                    cursor_pos = target
+                    if visual_cursor_pos is None:
+                        visual_cursor_pos = list(target)
+
+                if "attention" in data:
+                    current_attention_map = data["attention"]
+                if "objects" in data:
+                    current_objects = data["objects"]
+
+                if "metrics" in data:
+                    m = data["metrics"]
+                    # Update history
+                    if "reward_mean" in m: metrics_history["reward"].append(m["reward_mean"])
+                    if "dopamine" in m: metrics_history["dopamine"].append(m["dopamine"])
+                    if "plan_confidence" in m: metrics_history["confidence"].append(m["plan_confidence"])
+                    if "manual_dopamine" in m: metrics_history["manual_dopamine"].append(m["manual_dopamine"])
+                    
+                    # Trim
+                    for k in metrics_history:
+                        if len(metrics_history[k]) > MAX_HISTORY:
+                            metrics_history[k] = metrics_history[k][-MAX_HISTORY:]
 
                 if "grids" in data:
                     grids = data["grids"]
@@ -280,6 +388,25 @@ def main():
                     current_grid_idx += 1
                 # Stop at last frame, don't loop
         
+        # Interpolate Cursor
+        # Smoothly move visual_cursor_pos towards cursor_pos
+        if visual_cursor_pos and cursor_pos:
+            vx, vy = visual_cursor_pos
+            tx, ty = cursor_pos
+            
+            # Simple Lerp
+            # 0.2 factor at 60FPS = Fast convergence but smooth
+            lerp_factor = 0.2 
+            
+            vx += (tx - vx) * lerp_factor
+            vy += (ty - vy) * lerp_factor
+            
+            # Snap if close
+            if abs(tx - vx) < 0.01: vx = tx
+            if abs(ty - vy) < 0.01: vy = ty
+            
+            visual_cursor_pos = [vx, vy]
+
         # Draw
         screen.fill(BG_COLOR)
         
@@ -452,7 +579,101 @@ def main():
         draw_text("Click: Place/Interact (Action 6)", font)
         draw_text("Enter: Confirm (Action 7)", font)
         draw_text("R: Reset Level", font)
+        draw_text("H: Toggle Heatmap", font)
         draw_text("Q: Quit", font)
+        
+        # --- DRAW GRAPHS ---
+        # Draw at bottom of sidebar
+        graph_start_y = y_offset + 20
+        graph_h = 60
+        graph_w = SIDEBAR_WIDTH - 40
+        graph_x = GRID_WIDTH + 20
+        
+        # Move graphs up if they go off screen
+        # 3 graphs * (60 + 20) = 240px
+        # Slider = 40px
+        # Text = ~200px
+        # Total = 480px. Should fit in 800px.
+        
+        def draw_graph(title, data, y_pos, color, y_min=None, y_max=None):
+            if not data: return
+            
+            # Title
+            t_surf = font.render(title, True, color)
+            screen.blit(t_surf, (graph_x, y_pos))
+            
+            # Box
+            rect = pygame.Rect(graph_x, y_pos + 20, graph_w, graph_h)
+            pygame.draw.rect(screen, (30, 30, 30), rect)
+            pygame.draw.rect(screen, (100, 100, 100), rect, 1)
+            
+            if len(data) < 2: return
+            
+            # Scale
+            vals = data
+            min_v = min(vals) if y_min is None else y_min
+            max_v = max(vals) if y_max is None else y_max
+            
+            if max_v == min_v: max_v += 1e-6
+            
+            points = []
+            for i, v in enumerate(vals):
+                px = graph_x + (i / (MAX_HISTORY - 1)) * graph_w 
+                # Invert Y (pygame 0 is top)
+                norm_v = (v - min_v) / (max_v - min_v)
+                py = (y_pos + 20 + graph_h) - (norm_v * graph_h)
+                points.append((px, py))
+            
+            if len(points) > 1:
+                pygame.draw.lines(screen, color, False, points, 2)
+                
+            # Draw current value text
+            curr = vals[-1]
+            v_surf = font.render(f"{curr:.2f}", True, color)
+            screen.blit(v_surf, (graph_x + graph_w - v_surf.get_width(), y_pos))
+
+        draw_graph("Dopamine Level (AI)", metrics_history["dopamine"], graph_start_y, (0, 255, 255), y_min=0.0, y_max=1.0)
+        draw_graph("Dopamine Level (Human)", metrics_history["manual_dopamine"], graph_start_y + 90, (255, 100, 100), y_min=0.0, y_max=1.0)
+        draw_graph("Plan Confidence", metrics_history["confidence"], graph_start_y + 180, (255, 0, 255), y_min=0.0, y_max=1.0)
+        draw_graph("Avg Reward", metrics_history["reward"], graph_start_y + 270, (0, 255, 0))
+        
+        # --- DRAW SLIDER (Fixed Position) ---
+        # Ensure it's below the graphs but ON SCREEN
+        min_slider_y = graph_start_y + 360
+        # Clamp to ensure visibility even if overlapping
+        slider_y = min(WINDOW_HEIGHT - 60, max(WINDOW_HEIGHT - 80, min_slider_y))
+        
+        slider_x = GRID_WIDTH + 20
+        slider_w = SIDEBAR_WIDTH - 40
+        slider_h = 20
+        
+        # Label
+        s_text = font.render(f"Speed Delay: {speed_val:.2f}s", True, (200, 200, 200))
+        screen.blit(s_text, (slider_x, slider_y - 25))
+        
+        # Bar
+        pygame.draw.rect(screen, (50, 50, 50), (slider_x, slider_y, slider_w, slider_h))
+        
+        # Handle
+        handle_x = slider_x + int(speed_val * slider_w)
+        handle_rect = pygame.Rect(handle_x - 5, slider_y - 5, 10, slider_h + 10)
+        pygame.draw.rect(screen, (200, 200, 200), handle_rect)
+        
+        # --- DRAW DOPAMINE BUTTON ---
+        btn_x = slider_x
+        btn_y = slider_y - 50
+        btn_w = slider_w
+        btn_h = 40
+        
+        btn_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
+        # Color changes if active
+        btn_color = (255, 50, 50) if holding_d_key else (100, 0, 0)
+        pygame.draw.rect(screen, btn_color, btn_rect)
+        pygame.draw.rect(screen, (255, 255, 255), btn_rect, 2)
+        
+        btn_text = font.render("HOLD FOR DOPAMINE (D)", True, (255, 255, 255))
+        text_rect = btn_text.get_rect(center=btn_rect.center)
+        screen.blit(btn_text, text_rect)
 
         # Draw Game Grid
         if current_grids and len(current_grids) > 0:
@@ -472,81 +693,187 @@ def main():
                     pygame.draw.rect(screen, color, rect)
                     # Optional grid lines
                     # pygame.draw.rect(screen, GRID_LINE_COLOR, rect, 1)
+
+            # Draw Heatmap Overlay
+            if show_heatmap and current_attention_map:
+                # 1. Determine dimensions
+                hm_rows = len(current_attention_map)
+                hm_cols = len(current_attention_map[0]) if hm_rows > 0 else 0
+                
+                if hm_rows > 0 and hm_cols > 0:
+                    # Create Surface
+                    hm_surf = pygame.Surface((hm_cols, hm_rows), flags=pygame.SRCALPHA)
                     
-            # Highlight mouse hover
-            mx, my = pygame.mouse.get_pos()
-            if mx < GRID_WIDTH:
-                hx = mx // SCALE_FACTOR
-                hy = my // SCALE_FACTOR
-                if 0 <= hx < cols and 0 <= hy < rows:
-                    h_rect = (hx * SCALE_FACTOR, hy * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR)
-                    pygame.draw.rect(screen, (255, 255, 255), h_rect, 2)
+                    # Fill Surface
+                    for r in range(hm_rows):
+                        row_data = current_attention_map[r]
+                        for c in range(hm_cols):
+                            val = row_data[c] # 0.0 to 1.0
+                            
+                            # Visualization: Heatmap
+                            # Remove cutoff to debug visibility
+                            # Boost alpha
+                            if val < 0.05:
+                                alpha = 0
+                            else:
+                                # Non-linear alpha for visibility
+                                # 0.1 -> 50
+                                # 1.0 -> 200
+                                alpha = int(50 + val * 150)
+                                alpha = min(255, alpha)
+                            
+                            # Use Bright Red/Orange
+                            hm_surf.set_at((c, r), (255, 50, 0, alpha))
+                    
+                    # Scale logic ...
+                    target_w = hm_cols * SCALE_FACTOR
+                    target_h = hm_rows * SCALE_FACTOR
+                    
+                    full_hm = pygame.transform.scale(hm_surf, (target_w, target_h))
+                    
+                    visible_w = cols * SCALE_FACTOR
+                    visible_h = rows * SCALE_FACTOR
+                    
+                    blit_w = min(target_w, visible_w)
+                    blit_h = min(target_h, visible_h)
+                    
+                    screen.blit(full_hm, (0, 0), (0, 0, blit_w, blit_h))
             
-            # Visualize last click with mouse cursor sprite
+            # Draw Object Interest Overlay (Yellow Outlines)
+            if show_heatmap and current_objects and current_attention_map:
+                # Calculate aggregated score for each object
+                obj_scores = []
+                for obj in current_objects:
+                    score_sum = 0
+                    count = 0
+                    for r, c in obj:
+                        if r < len(current_attention_map) and c < len(current_attention_map[0]):
+                            score_sum += current_attention_map[r][c]
+                            count += 1
+                    
+                    avg_score = score_sum / count if count > 0 else 0
+                    obj_scores.append((avg_score, obj))
+                
+                # Sort by score
+                obj_scores.sort(key=lambda x: x[0], reverse=True)
+                
+                # Draw top 3 objects
+                for i, (score, obj) in enumerate(obj_scores[:3]):
+                    if score < 0.1: continue # Ignore low interest
+                    
+                    # Draw Outline
+                    # Naive approach: draw rect for each pixel, or convex hull
+                    # Let's draw rects for each pixel for simplicity
+                    
+                    # Color based on rank
+                    if i == 0: color = (0, 255, 0) # Green (Top)
+                    elif i == 1: color = (255, 255, 0) # Yellow
+                    else: color = (255, 165, 0) # Orange
+                    
+                    for r, c in obj:
+                        rect = (c * SCALE_FACTOR, r * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR)
+                        pygame.draw.rect(screen, color, rect, 2)
+                    
+                    # Label the object with its score
+                    if obj:
+                         # Find center
+                        rs = [p[0] for p in obj]
+                        cs = [p[1] for p in obj]
+                        cr = sum(rs) / len(rs)
+                        cc = sum(cs) / len(cs)
+                        
+                        txt = font.render(f"{score:.2f}", True, (255, 255, 255))
+                        screen.blit(txt, (cc * SCALE_FACTOR, cr * SCALE_FACTOR))
+
+            # Highlight mouse hover (REMOVED - duplicate visual)
+            # mx, my = pygame.mouse.get_pos()
+            # if mx < GRID_WIDTH: ...
+            
+            # Visualize last click with subtle ripple
             if last_click_pos:
                 lx, ly = last_click_pos
                 time_diff = pygame.time.get_ticks() - last_click_time
                 if time_diff < CLICK_VIS_DURATION:
-                    # Calculate position (cursor hot spot at click location)
-                    hot_x = int(lx * SCALE_FACTOR + SCALE_FACTOR // 2)
-                    hot_y = int(ly * SCALE_FACTOR + SCALE_FACTOR // 2)
+                    # Calculate center in screen coords
+                    center_x = int(round(lx)) * SCALE_FACTOR + (SCALE_FACTOR // 2)
+                    center_y = int(round(ly)) * SCALE_FACTOR + (SCALE_FACTOR // 2)
                     
-                    # Cursor size (standard is 16x16, scale appropriately)
-                    cursor_size = max(10, min(int(SCALE_FACTOR * 1.5), 24))
+                    # Growing ripple effect
+                    # Radius grows from 0 to SCALE_FACTOR
+                    progress = time_diff / CLICK_VIS_DURATION
+                    radius = int(SCALE_FACTOR * progress * 1.5)
                     
-                    # Standard Windows-style mouse cursor (arrow pointing up-left)
-                    # Hot spot is at the tip (0, 0 relative)
-                    # Define points for a simple arrow cursor
-                    points = [
-                        (0, 0),           # Tip
-                        (0, cursor_size), # Bottom-left
-                        (cursor_size * 0.3, cursor_size * 0.7), # Inner corner
-                        (cursor_size * 0.5, cursor_size * 0.9), # Tail bottom-left
-                        (cursor_size * 0.7, cursor_size * 0.7), # Tail bottom-right
-                        (cursor_size * 0.5, cursor_size * 0.5), # Tail inner
-                        (cursor_size * 0.7, cursor_size * 0.5), # Right edge
-                    ]
+                    # Fade out alpha
+                    alpha = int(255 * (1.0 - progress))
                     
-                    # Offset and rotate slightly to look natural (tilted left)
-                    # Actually, simpler: just hardcode the tilted shape
-                    tilted_points = [
-                        (0, 0),
-                        (0, cursor_size),
-                        (cursor_size * 0.25, cursor_size * 0.75),
-                        (cursor_size * 0.45, cursor_size * 1.2), # Tail extended
-                        (cursor_size * 0.65, cursor_size * 1.1), # Tail width
-                        (cursor_size * 0.45, cursor_size * 0.65),
-                        (cursor_size * 0.75, cursor_size * 0.65)
-                    ]
-                    
-                    # Adjust to screen coords
-                    screen_points = [(hot_x + p[0], hot_y + p[1]) for p in tilted_points]
-                    
-                    # Draw black outline/shadow first
-                    shadow_points = [(p[0] + 1, p[1] + 1) for p in screen_points]
-                    pygame.draw.polygon(screen, (0, 0, 0), shadow_points)
-                    
-                    # Draw white fill
-                    pygame.draw.polygon(screen, (255, 255, 255), screen_points)
-                    
-                    # Draw black border
-                    pygame.draw.polygon(screen, (0, 0, 0), screen_points, 1)
+                    # Draw Circle
+                    if radius > 0:
+                        s = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+                        # Draw circle on surface
+                        pygame.draw.circle(s, (255, 255, 255, alpha), (radius, radius), radius, 2)
+                        # Blit centered
+                        screen.blit(s, (center_x - radius, center_y - radius))
 
             # Draw Virtual Cursor
-            if cursor_pos:
-                cx, cy = cursor_pos
-                # Draw a hollow white box at cursor position
-                rect = (cx * SCALE_FACTOR, cy * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR)
-                # Outer white
-                pygame.draw.rect(screen, (255, 255, 255), rect, 2)
-                # Inner black for contrast
-                inner_rect = (cx * SCALE_FACTOR + 2, cy * SCALE_FACTOR + 2, SCALE_FACTOR - 4, SCALE_FACTOR - 4)
-                pygame.draw.rect(screen, (0, 0, 0), inner_rect, 1)
-                    
-        else:
-            # Placeholder text
-            text = font.render("Waiting for game state...", True, (100, 100, 100))
-            screen.blit(text, (GRID_WIDTH // 2 - 100, WINDOW_HEIGHT // 2))
+            if visual_cursor_pos:
+                cx, cy = visual_cursor_pos
+                
+                # Visual Highlight of the "Active" cell (Rounded)
+                active_cx = int(round(cx))
+                active_cy = int(round(cy))
+                
+                # Draw Active Cell Highlight (Blue tint)
+                if current_grids:
+                    grid = current_grids[0]
+                    rows = len(grid)
+                    cols = len(grid[0])
+                    if 0 <= active_cx < cols and 0 <= active_cy < rows:
+                         rect = (active_cx * SCALE_FACTOR, active_cy * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR)
+                         s = pygame.Surface((SCALE_FACTOR, SCALE_FACTOR), pygame.SRCALPHA)
+                         s.fill((0, 100, 255, 50)) # Transparent blue
+                         screen.blit(s, rect)
+                         pygame.draw.rect(screen, (0, 100, 255), rect, 2)
+                
+                # Draw Actual Cursor (Proper Mouse Sprite)
+                # Position is the floating point location
+                # We draw the tip of the cursor at the center of the 'virtual' position
+                # Or should the center of the crosshair be the tip?
+                # Let's align the TIP of the arrow to (px, py) to be precise.
+                
+                cursor_tip_x = cx * SCALE_FACTOR + (SCALE_FACTOR / 2)
+                cursor_tip_y = cy * SCALE_FACTOR + (SCALE_FACTOR / 2)
+                
+                # Draw Arrow Cursor
+                c_size = 24 # Slightly larger constant size
+                
+                # Classic Arrow Shape
+                arrow_pts = [
+                    (0, 0),
+                    (0, c_size),
+                    (c_size * 0.25, c_size * 0.75),
+                    (c_size * 0.5, c_size * 1.2),
+                    (c_size * 0.7, c_size * 1.1),
+                    (c_size * 0.45, c_size * 0.65),
+                    (c_size * 0.75, c_size * 0.65)
+                ]
+                
+                # Transform to screen space
+                screen_pts = [(cursor_tip_x + p[0], cursor_tip_y + p[1]) for p in arrow_pts]
+                
+                # Shadow
+                shadow_pts = [(p[0]+1, p[1]+1) for p in screen_pts]
+                pygame.draw.polygon(screen, (0, 0, 0), shadow_pts)
+                
+                # Fill White
+                pygame.draw.polygon(screen, (255, 255, 255), screen_pts)
+                
+                # Border Black
+                pygame.draw.polygon(screen, (0, 0, 0), screen_pts, 1)
+                
+            else:
+                # Placeholder text
+                text = font.render("Waiting for game state...", True, (100, 100, 100))
+                screen.blit(text, (GRID_WIDTH // 2 - 100, WINDOW_HEIGHT // 2))
 
         pygame.display.flip()
         clock.tick(60) # 60 FPS for smoother feedback

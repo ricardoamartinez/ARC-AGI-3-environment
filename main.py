@@ -33,8 +33,14 @@ if (SCHEME == "http" and str(PORT) == "80") or (
     ROOT_URL = f"{SCHEME}://{HOST}"
 else:
     ROOT_URL = f"{SCHEME}://{HOST}:{PORT}"
+
+# API Key: Use env var if valid, otherwise use provided default
+_api_key = os.getenv("ARC_API_KEY", "")
+if not _api_key or _api_key.startswith("your_"):
+    _api_key = "894cb2d9-45a5-4897-91e8-f03d7d4a1f8a"
+
 HEADERS = {
-    "X-API-Key": os.getenv("ARC_API_KEY", ""),
+    "X-API-Key": _api_key,
     "Accept": "application/json",
 }
 
@@ -116,6 +122,7 @@ def main() -> None:
         return
 
     print(f"{ROOT_URL}/api/games")
+    print(f"Using API Key: {HEADERS['X-API-Key'][:8]}...{HEADERS['X-API-Key'][-4:]}")
 
     # Get the list of games from the API
     full_games = []
@@ -126,7 +133,9 @@ def main() -> None:
 
         if r.status_code == 200:
             try:
-                full_games = [g["game_id"] for g in r.json()]
+                response_json = r.json()
+                print(f"API returned {len(response_json)} games")
+                full_games = [g["game_id"] for g in response_json]
             except (ValueError, KeyError) as e:
                 logger.error(f"Failed to parse games response: {e}")
                 logger.error(f"Response content: {r.text[:200]}")

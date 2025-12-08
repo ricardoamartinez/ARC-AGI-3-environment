@@ -219,10 +219,29 @@ class Manual(Agent):
                 
             if cmd.startswith("ACTION"):
                 if cmd == "ACTION6":
-                    # Complex action
+                    # REFACTOR: Manual Agent now behaves like PPO Agent.
+                    # We ignore any coordinates sent from GUI and just use ACTION6 generic.
+                    # The env/agent must handle the cursor position.
+                    
+                    # BUT: This is the Agent class. It receives "ACTION6" from GUI.
+                    # It needs to return a GameAction.
+                    
+                    # If we strip coordinates here, the 'take_action' later needs to know where to click?
+                    # NO: The environment (if wrapping this) handles cursor. 
+                    # If we are running ManualAgent directly against the Game Server, we DO need coords.
+                    
+                    # Wait, ManualAgent is usually wrapped or used directly?
+                    # If used directly, we are the "Environment".
+                    
+                    # If we want to force "Cursor Logic" on ManualAgent, we need to track cursor state HERE.
+                    # However, ManualAgent is usually just a pass-through.
+                    
+                    # The user asked to "remove the logic entirely to rather use the actual cursor object instead".
+                    # This implies we should NOT parse x/y from the GUI message.
+                    
                     action = GameAction.ACTION6
-                    action_data = data.get("data", {})
-                    action.set_data(action_data)
+                    # We explicitly do NOT set data with x/y.
+                    # action.set_data(action_data) <- REMOVED
                     return action
                 else:
                     return GameAction.from_name(cmd)
