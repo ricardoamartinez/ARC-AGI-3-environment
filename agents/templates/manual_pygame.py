@@ -106,6 +106,7 @@ def main():
         "dopamine": [],
         "confidence": [],
         "manual_dopamine": [],
+        "pain": [],
         "trigger": []
     }
     MAX_HISTORY = 200
@@ -113,8 +114,10 @@ def main():
     # Speed Slider & Manual Dopamine
     speed_val = 0.0 
     manual_dopamine_val = 0.0 # 0.0 to 1.0, controlled by 'D' key
+    manual_pain_val = 0.0 # 0.0 to 1.0, controlled by 'P' key
     dragging_slider = False
     holding_d_key = False
+    holding_p_key = False
     
     running = True
     
@@ -174,6 +177,8 @@ def main():
                     show_heatmap = not show_heatmap
                 elif event.key == pygame.K_d:
                     holding_d_key = True
+                elif event.key == pygame.K_p:
+                    holding_p_key = True
                 elif event.key == pygame.K_q:
                     send_action("QUIT")
                     running = False
@@ -181,19 +186,32 @@ def main():
             elif event.type == pygame.KEYUP:
                 if event.key == pygame.K_d:
                     holding_d_key = False
+                elif event.key == pygame.K_p:
+                    holding_p_key = False
             
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1: # Left click
                     x, y = event.pos
                     
-                    # Calculate dynamic positions again for hit testing
-                    graph_start_y = y_offset + 20
-                    min_slider_y = graph_start_y + 360
-                    slider_y = min(WINDOW_HEIGHT - 60, max(WINDOW_HEIGHT - 80, min_slider_y))
+                    # --- RECALCULATE HIT ZONES (Match Layout) ---
+                    # These must match the layout logic in the draw loop
+                    SIDEBAR_X = GRID_WIDTH
+                    SIDEBAR_PAD = 20
+                    CONTROLS_Y_START = WINDOW_HEIGHT - 200
                     
-                    slider_x = GRID_WIDTH + 20
-                    slider_w = SIDEBAR_WIDTH - 40
+                    slider_x = SIDEBAR_X + SIDEBAR_PAD
+                    slider_w = SIDEBAR_WIDTH - (SIDEBAR_PAD * 2)
                     slider_h = 20
+                    
+                    # Slider Y: cy starts at CONTROLS_Y_START, text at +0, slider at +25
+                    slider_y = CONTROLS_Y_START + 25
+                    
+                    # Dopamine Y: +50 from slider start
+                    d_btn_y = slider_y + 50
+                    btn_h = 40
+                    
+                    # Pain Y: +50 from Dopamine start
+                    p_btn_y = d_btn_y + 50
                     
                     # Check Slider
                     slider_rect = pygame.Rect(slider_x, slider_y, slider_w, slider_h)
@@ -204,11 +222,14 @@ def main():
                         send_action("SET_SPEED", value=speed_val)
                     
                     # Check Dopamine Button
-                    btn_y = slider_y - 50
-                    btn_h = 40
-                    btn_rect = pygame.Rect(slider_x, btn_y, slider_w, btn_h)
-                    if btn_rect.collidepoint(x, y):
+                    d_btn_rect = pygame.Rect(slider_x, d_btn_y, slider_w, btn_h)
+                    if d_btn_rect.collidepoint(x, y):
                         holding_d_key = True
+                    
+                    # Check Pain Button
+                    p_btn_rect = pygame.Rect(slider_x, p_btn_y, slider_w, btn_h)
+                    if p_btn_rect.collidepoint(x, y):
+                        holding_p_key = True
                     
                     # Check if click is in grid area
                     elif x < GRID_WIDTH:
@@ -222,12 +243,17 @@ def main():
                     dragging_slider = False
                     if holding_d_key: # Release button
                         holding_d_key = False
+                    if holding_p_key:
+                        holding_p_key = False
             
             elif event.type == pygame.MOUSEMOTION:
                 if dragging_slider:
                     x, y = event.pos
-                    slider_x = GRID_WIDTH + 20
-                    slider_w = SIDEBAR_WIDTH - 40
+                    # Recalc dimensions
+                    SIDEBAR_X = GRID_WIDTH
+                    SIDEBAR_PAD = 20
+                    slider_x = SIDEBAR_X + SIDEBAR_PAD
+                    slider_w = SIDEBAR_WIDTH - (SIDEBAR_PAD * 2)
                     
                     ratio = (x - slider_x) / slider_w
                     speed_val = max(0.0, min(1.0, ratio))
@@ -240,6 +266,12 @@ def main():
         else:
             manual_dopamine_val = max(0.0, manual_dopamine_val - 0.01) # Slower decay
             
+        # Manual Pain Logic
+        if holding_p_key:
+            manual_pain_val = min(1.0, manual_pain_val + 0.05) # Pain rises fast
+        else:
+            manual_pain_val = max(0.0, manual_pain_val - 0.02) # Pain decays moderately
+
         if abs(manual_dopamine_val) > 0.001 or holding_d_key:
              # Send update if value is significant or changing
              # We piggyback on any action or just send dedicated update?
@@ -255,6 +287,11 @@ def main():
         if abs(manual_dopamine_val - last_sent_dopamine) > 0.01:
             send_action("SET_MANUAL_DOPAMINE", value=manual_dopamine_val)
             last_sent_dopamine = manual_dopamine_val
+            
+        if 'last_sent_pain' not in locals(): last_sent_pain = -1
+        if abs(manual_pain_val - last_sent_pain) > 0.01:
+            send_action("SET_MANUAL_PAIN", value=manual_pain_val)
+            last_sent_pain = manual_pain_val
 
         # Process incoming messages
         # Consume ALL messages in queue to catch up to latest state
@@ -306,6 +343,7 @@ def main():
                     if "dopamine" in m: metrics_history["dopamine"].append(m["dopamine"])
                     if "plan_confidence" in m: metrics_history["confidence"].append(m["plan_confidence"])
                     if "manual_dopamine" in m: metrics_history["manual_dopamine"].append(m["manual_dopamine"])
+                    if "pain" in m: metrics_history["pain"].append(m["pain"])
                     if "trigger" in m: metrics_history["trigger"].append(m["trigger"])
                     
                     # Trim
@@ -545,154 +583,165 @@ def main():
         else:
             # Standard Agent View
             
-            # Draw Sidebar
-            # Draw separator line
-            pygame.draw.line(screen, BORDER_COLOR, (GRID_WIDTH, 0), (GRID_WIDTH, WINDOW_HEIGHT), 2)
+            # --- LAYOUT CONSTANTS ---
+            SIDEBAR_X = GRID_WIDTH
+            SIDEBAR_PAD = 20
             
-            # Draw Text Info
-        y_offset = 20
-        def draw_text(text, font_obj, color=TEXT_COLOR):
-            nonlocal y_offset
-            surf = font_obj.render(text, True, color)
-            screen.blit(surf, (GRID_WIDTH + 20, y_offset))
-            y_offset += 30
+            INFO_Y_START = 20
+            GRAPHS_Y_START = 350 # Fixed start for graphs
+            CONTROLS_Y_START = WINDOW_HEIGHT - 200 # Fixed area at bottom
+            
+            # Draw Sidebar Background
+            pygame.draw.rect(screen, SIDEBAR_BG, (SIDEBAR_X, 0, SIDEBAR_WIDTH, WINDOW_HEIGHT))
+            pygame.draw.line(screen, BORDER_COLOR, (SIDEBAR_X, 0), (SIDEBAR_X, WINDOW_HEIGHT), 2)
+            
+            # --- 1. INFO PANEL ---
+            curr_y = INFO_Y_START
+            
+            def draw_line(text, font_obj, color=TEXT_COLOR):
+                nonlocal curr_y
+                surf = font_obj.render(text, True, color)
+                screen.blit(surf, (SIDEBAR_X + SIDEBAR_PAD, curr_y))
+                curr_y += surf.get_height() + 5
 
-        draw_text(f"Game: {game_id}", title_font)
-        draw_text(f"Score: {score}", font)
-        draw_text(f"State: {state}", font) # Added back state/steps display
-        
-        if waiting_for_server:
-            draw_text("Status: Processing...", font, (255, 255, 0))
-        else:
-            draw_text("Status: Ready", font, (0, 255, 0))
+            draw_line(f"Game: {game_id}", title_font)
+            draw_line(f"Score: {score}", font)
+            draw_line(f"State: {state}", font)
             
-        if last_action_info:
-            aid = last_action_info.get("id")
-            # Prioritize name sent by environment (contains symbols)
-            aname = last_action_info.get("name")
-            if not aname:
-                aname = ACTION_NAMES.get(aid, str(aid))
-            
-            # Add details for clicks
-            if aid == 6:
-                adata = last_action_info.get("data", {})
-                if adata and "x" in adata and "y" in adata:
-                    if "(" not in aname:
-                        aname += f" ({adata['x']}, {adata['y']})"
-            
-            draw_text(f"Last Action: {aname}", font, (0, 200, 255))
-            
-            # Draw Bottom-Left Overlay
-            overlay_surf = overlay_font.render(aname, True, (0, 255, 255))
-            # Shadow
-            shadow_surf = overlay_font.render(aname, True, (0, 0, 0))
-            screen.blit(shadow_surf, (22, WINDOW_HEIGHT - 48))
-            screen.blit(overlay_surf, (20, WINDOW_HEIGHT - 50))
-            
-        y_offset += 20
-        
-        draw_text("CONTROLS:", title_font)
-        draw_text("Arrows: Move (Action 1-4)", font)
-        draw_text("Space: Use (Action 5)", font)
-        draw_text("Click: Place/Interact (Action 6)", font)
-        draw_text("Enter: Confirm (Action 7)", font)
-        draw_text("R: Reset Level", font)
-        draw_text("H: Toggle Heatmap", font)
-        draw_text("Q: Quit", font)
-        
-        # --- DRAW GRAPHS ---
-        # Draw at bottom of sidebar
-        graph_start_y = y_offset + 20
-        graph_h = 60
-        graph_w = SIDEBAR_WIDTH - 40
-        graph_x = GRID_WIDTH + 20
-        
-        # Move graphs up if they go off screen
-        # 3 graphs * (60 + 20) = 240px
-        # Slider = 40px
-        # Text = ~200px
-        # Total = 480px. Should fit in 800px.
-        
-        def draw_graph(title, data, y_pos, color, y_min=None, y_max=None):
-            if not data: return
-            
-            # Title
-            t_surf = font.render(title, True, color)
-            screen.blit(t_surf, (graph_x, y_pos))
-            
-            # Box
-            rect = pygame.Rect(graph_x, y_pos + 20, graph_w, graph_h)
-            pygame.draw.rect(screen, (30, 30, 30), rect)
-            pygame.draw.rect(screen, (100, 100, 100), rect, 1)
-            
-            if len(data) < 2: return
-            
-            # Scale
-            vals = data
-            min_v = min(vals) if y_min is None else y_min
-            max_v = max(vals) if y_max is None else y_max
-            
-            if max_v == min_v: max_v += 1e-6
-            
-            points = []
-            for i, v in enumerate(vals):
-                px = graph_x + (i / (MAX_HISTORY - 1)) * graph_w 
-                # Invert Y (pygame 0 is top)
-                norm_v = (v - min_v) / (max_v - min_v)
-                py = (y_pos + 20 + graph_h) - (norm_v * graph_h)
-                points.append((px, py))
-            
-            if len(points) > 1:
-                pygame.draw.lines(screen, color, False, points, 2)
+            if waiting_for_server:
+                draw_line("Status: Processing...", font, (255, 255, 0))
+            else:
+                draw_line("Status: Ready", font, (0, 255, 0))
                 
-            # Draw current value text
-            curr = vals[-1]
-            v_surf = font.render(f"{curr:.2f}", True, color)
-            screen.blit(v_surf, (graph_x + graph_w - v_surf.get_width(), y_pos))
+            curr_y += 10 # Spacer
+            
+            if last_action_info:
+                aid = last_action_info.get("id")
+                aname = last_action_info.get("name")
+                if not aname: aname = ACTION_NAMES.get(aid, str(aid))
+                
+                if aid == 6:
+                    adata = last_action_info.get("data", {})
+                    if adata and "x" in adata:
+                        if "(" not in aname: aname += f" ({adata['x']}, {adata['y']})"
+                
+                draw_line(f"Last Action:", font, (200, 200, 200))
+                draw_line(f"{aname}", title_font, (0, 200, 255))
+                
+                # Draw Bottom-Left Overlay (On Grid)
+                overlay_surf = overlay_font.render(aname, True, (0, 255, 255))
+                shadow_surf = overlay_font.render(aname, True, (0, 0, 0))
+                screen.blit(shadow_surf, (22, WINDOW_HEIGHT - 48))
+                screen.blit(overlay_surf, (20, WINDOW_HEIGHT - 50))
+            
+            curr_y += 10
+            draw_line("CONTROLS:", title_font)
+            draw_line("ARROWS: Move  SPACE: Use", font, (150, 150, 150))
+            draw_line("ENTER: Confirm  R: Reset", font, (150, 150, 150))
+            draw_line("CLICK: Interact  H: Heatmap", font, (150, 150, 150))
+            draw_line("D: Dopamine  P: Pain  Q: Quit", font, (150, 150, 150))
 
-        draw_graph("Dopamine Level (AI)", metrics_history["dopamine"], graph_start_y, (0, 255, 255), y_min=0.0, y_max=1.0)
-        draw_graph("Dopamine Level (Human)", metrics_history["manual_dopamine"], graph_start_y + 90, (255, 100, 100), y_min=0.0, y_max=1.0)
-        draw_graph("Action Urge (Trigger)", metrics_history["trigger"], graph_start_y + 180, (255, 255, 0), y_min=-1.0, y_max=1.0)
-        draw_graph("Plan Confidence", metrics_history["confidence"], graph_start_y + 270, (255, 0, 255), y_min=0.0, y_max=1.0)
-        draw_graph("Avg Reward", metrics_history["reward"], graph_start_y + 360, (0, 255, 0))
-        
-        # --- DRAW SLIDER (Fixed Position) ---
-        # Ensure it's below the graphs but ON SCREEN
-        min_slider_y = graph_start_y + 450
-        # Clamp to ensure visibility even if overlapping
-        slider_y = min(WINDOW_HEIGHT - 60, max(WINDOW_HEIGHT - 80, min_slider_y))
-        
-        slider_x = GRID_WIDTH + 20
-        slider_w = SIDEBAR_WIDTH - 40
-        slider_h = 20
-        
-        # Label
-        s_text = font.render(f"Speed Delay: {speed_val:.2f}s", True, (200, 200, 200))
-        screen.blit(s_text, (slider_x, slider_y - 25))
-        
-        # Bar
-        pygame.draw.rect(screen, (50, 50, 50), (slider_x, slider_y, slider_w, slider_h))
-        
-        # Handle
-        handle_x = slider_x + int(speed_val * slider_w)
-        handle_rect = pygame.Rect(handle_x - 5, slider_y - 5, 10, slider_h + 10)
-        pygame.draw.rect(screen, (200, 200, 200), handle_rect)
-        
-        # --- DRAW DOPAMINE BUTTON ---
-        btn_x = slider_x
-        btn_y = slider_y - 50
-        btn_w = slider_w
-        btn_h = 40
-        
-        btn_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
-        # Color changes if active
-        btn_color = (255, 50, 50) if holding_d_key else (100, 0, 0)
-        pygame.draw.rect(screen, btn_color, btn_rect)
-        pygame.draw.rect(screen, (255, 255, 255), btn_rect, 2)
-        
-        btn_text = font.render("HOLD FOR DOPAMINE (D)", True, (255, 255, 255))
-        text_rect = btn_text.get_rect(center=btn_rect.center)
-        screen.blit(btn_text, text_rect)
+            # --- 2. GRAPHS PANEL ---
+            # 6 graphs available
+            graph_titles = [
+                ("Dopamine (AI)", "dopamine", (0, 255, 255), 0.0, 1.0),
+                ("Dopamine (Human)", "manual_dopamine", (255, 100, 100), 0.0, 1.0),
+                ("Pain Level", "pain", (255, 0, 0), 0.0, 10.0),
+                ("Action Urge", "trigger", (255, 255, 0), -1.0, 1.0),
+                ("Confidence", "confidence", (255, 0, 255), 0.0, 1.0),
+                ("Avg Reward", "reward", (0, 255, 0), None, None)
+            ]
+            
+            # Dynamic calculation to fit available space
+            avail_h = CONTROLS_Y_START - GRAPHS_Y_START - 20
+            graph_slot_h = avail_h / len(graph_titles)
+            actual_graph_h = min(60, graph_slot_h - 25) # Height of the line box itself
+            
+            graph_w = SIDEBAR_WIDTH - (SIDEBAR_PAD * 2)
+            graph_x = SIDEBAR_X + SIDEBAR_PAD
+            
+            for i, (g_title, g_key, g_col, g_min, g_max) in enumerate(graph_titles):
+                gy = GRAPHS_Y_START + (i * graph_slot_h)
+                
+                # Title
+                t_surf = font.render(g_title, True, g_col)
+                screen.blit(t_surf, (graph_x, gy))
+                
+                # Box
+                box_y = gy + 20
+                rect = pygame.Rect(graph_x, box_y, graph_w, actual_graph_h)
+                pygame.draw.rect(screen, (30, 30, 30), rect)
+                pygame.draw.rect(screen, (80, 80, 80), rect, 1)
+                
+                # Data
+                data = metrics_history.get(g_key, [])
+                if len(data) > 1:
+                    vals = data
+                    min_v = min(vals) if g_min is None else g_min
+                    max_v = max(vals) if g_max is None else g_max
+                    if max_v <= min_v: max_v = min_v + 1e-6
+                    
+                    points = []
+                    for j, v in enumerate(vals):
+                        px = graph_x + (j / (MAX_HISTORY - 1)) * graph_w
+                        norm_v = (v - min_v) / (max_v - min_v)
+                        norm_v = max(0.0, min(1.0, norm_v)) # Clip
+                        py = (box_y + actual_graph_h) - (norm_v * actual_graph_h)
+                        points.append((px, py))
+                    
+                    pygame.draw.lines(screen, g_col, False, points, 2)
+                    
+                    # Current Value
+                    curr = vals[-1]
+                    v_surf = font.render(f"{curr:.2f}", True, g_col)
+                    screen.blit(v_surf, (graph_x + graph_w - v_surf.get_width(), gy))
+
+            # --- 3. CONTROLS PANEL ---
+            cy = CONTROLS_Y_START
+            
+            # Slider
+            s_text = font.render(f"Speed Delay: {speed_val:.2f}s", True, (200, 200, 200))
+            screen.blit(s_text, (graph_x, cy))
+            
+            cy += 25
+            slider_rect = pygame.Rect(graph_x, cy, graph_w, 20)
+            pygame.draw.rect(screen, (50, 50, 50), slider_rect)
+            
+            handle_x = graph_x + int(speed_val * graph_w)
+            handle_rect = pygame.Rect(handle_x - 5, cy - 5, 10, 30)
+            pygame.draw.rect(screen, (200, 200, 200), handle_rect)
+            
+            # Logic for Slider Interaction (Reuse variable names for event loop compatibility)
+            # We need to update the global detection rects used in the event loop!
+            # Or better: Just use fixed coordinates logic in event loop that matches this.
+            # But the event loop logic calculated positions dynamically based on previous ad-hoc offsets.
+            # We must sync them.
+            
+            # Buttons
+            cy += 50
+            btn_h = 40
+            
+            # Dopamine
+            d_rect = pygame.Rect(graph_x, cy, graph_w, btn_h)
+            d_col = (50, 255, 50) if holding_d_key else (0, 100, 0)
+            pygame.draw.rect(screen, d_col, d_rect)
+            pygame.draw.rect(screen, (255, 255, 255), d_rect, 2)
+            d_txt = font.render("DOPAMINE (D)", True, (255, 255, 255))
+            screen.blit(d_txt, d_txt.get_rect(center=d_rect.center))
+            
+            # Pain
+            cy += 50
+            p_rect = pygame.Rect(graph_x, cy, graph_w, btn_h)
+            p_col = (255, 50, 50) if holding_p_key else (100, 0, 0)
+            pygame.draw.rect(screen, p_col, p_rect)
+            pygame.draw.rect(screen, (255, 255, 255), p_rect, 2)
+            p_txt = font.render("PAIN (P)", True, (255, 255, 255))
+            screen.blit(p_txt, p_txt.get_rect(center=p_rect.center))
+            
+            # Update global rect variables for hit testing in next frame loop
+            # We can't easily export these back to the event loop scope in this structure 
+            # without making them global or calculating them identically in event loop.
+            # Let's standardize the hit test logic in the event loop to match this layout.
 
         # Draw Game Grid
         if current_grids and len(current_grids) > 0:

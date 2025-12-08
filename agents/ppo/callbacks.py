@@ -159,6 +159,9 @@ class LiveVisualizerCallback(BaseCallback):
                 objects = getattr(self.agent, "latest_detected_objects", [])
                 dopamine = 0.0
                 plan_confidence = 0.0
+                manual_dopamine = 0.0
+                pain = 0.0
+                manual_pain = 0.0
                 
                 try:
                     infos = self.locals.get("infos", [])
@@ -167,6 +170,8 @@ class LiveVisualizerCallback(BaseCallback):
                         dopamine = float(info.get("dopamine", 0.0))
                         plan_confidence = float(info.get("plan_confidence", 0.0))
                         manual_dopamine = float(info.get("manual_dopamine", 0.0))
+                        pain = float(info.get("pain", 0.0))
+                        manual_pain = float(info.get("manual_pain", 0.0))
                 except:
                     pass
 
@@ -192,7 +197,9 @@ class LiveVisualizerCallback(BaseCallback):
                             "dopamine": dopamine,
                             "plan_confidence": plan_confidence,
                             "reward_mean": rew_mean,
-                            "manual_dopamine": manual_dopamine
+                            "manual_dopamine": manual_dopamine,
+                            "pain": pain,
+                            "manual_pain": manual_pain
                         }
                     }
                     

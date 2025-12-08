@@ -176,20 +176,32 @@ class ARCGymEnv(gym.Env):
 
         # Base Reward (Time & Energy)
         reward = 0.0
-        reward -= (abs(ax) + abs(ay)) * 0.01
-        reward -= max(0.0, trigger) * 0.5
-        reward -= 0.01 * self.current_step # Time penalty
+        
+        # Calculate Pain Components (Negative Rewards)
+        pain = 0.0
+        
+        pain += (abs(ax) + abs(ay)) * 0.01
+        pain += max(0.0, trigger) * 0.5
+        pain += 0.01 * self.current_step # Time penalty
         
         sparsity_multiplier = 1.0 / (1.0 + self.action_processor.consecutive_action_steps)
         
         if final_action_idx != -1:
-            reward -= 2.0 # Action cost
+            pain += 2.0 # Action cost
             if self.action_processor.consecutive_action_steps > 1:
-                reward -= 10.0 * self.action_processor.consecutive_action_steps
+                pain += 10.0 * self.action_processor.consecutive_action_steps
                 self.intrinsic_system.dopamine_level = 0.0
         else:
              if trigger < 0.0:
                  reward += 0.1 + min(1.0, self.action_processor.idle_streak * 0.002)
+
+        # Manual Pain (Administered by User)
+        if hasattr(self.agent, 'manual_pain') and self.agent.manual_pain > 0:
+            # Strong penalty for manual pain
+            pain += self.agent.manual_pain * 50.0
+
+        # Apply Pain
+        reward -= pain
 
         # Score Diff
         score_diff = float(frame.score - self.last_score)
@@ -243,6 +255,7 @@ class ARCGymEnv(gym.Env):
             reward += 100.0
         elif frame.state == GameState.GAME_OVER:
             reward -= 50.0
+            pain += 50.0
 
         prev_grid = self.last_grid
         self.last_grid = current_grid
@@ -252,6 +265,8 @@ class ARCGymEnv(gym.Env):
             "score": frame.score,
             "dopamine": self.intrinsic_system.predicted_dopamine,
             "manual_dopamine": self.intrinsic_system.manual_dopamine,
+            "pain": pain,
+            "manual_pain": getattr(self.agent, "manual_pain", 0.0),
             "plan_confidence": self.intrinsic_system.plan_confidence,
             "reward": reward,
             "trigger": float(trigger)

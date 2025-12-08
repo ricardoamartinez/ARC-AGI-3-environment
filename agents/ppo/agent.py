@@ -183,6 +183,7 @@ class PPOAgent(Agent):
         self._gui_reader_thread = None
         self.training_speed = 0.0 # 0.0 (Fast) to 1.0 (Slow)
         self.manual_dopamine = 0.0 # Shared state
+        self.manual_pain = 0.0 # Shared state
         self._start_gui()
 
     def _start_gui(self):
@@ -227,6 +228,8 @@ class PPOAgent(Agent):
                                     self.training_speed = max(0.0, min(1.0, speed))
                                 elif data.get("action") == "SET_MANUAL_DOPAMINE":
                                     self.manual_dopamine = float(data.get("value", 0.0))
+                                elif data.get("action") == "SET_MANUAL_PAIN":
+                                    self.manual_pain = float(data.get("value", 0.0))
                             except json.JSONDecodeError:
                                 pass
                         except Exception as e:
@@ -295,16 +298,17 @@ class PPOAgent(Agent):
             env, 
             verbose=1,
             learning_rate=0.0003,
-            n_steps=512, # Increased from 128 for better stability and longer horizon
-            batch_size=64, # Increased from 8 to stabilize gradients (CNN is efficient enough)
-            gamma=0.99,
-            ent_coef=0.005, # Further reduced entropy to discourage random spamming
+            n_steps=16, # Extremely small buffer for realtime online updates (approx every 16 frames)
+            batch_size=16, # Match n_steps to update on everything immediately
+            n_epochs=2, # Few epochs to keep latency low
+            gamma=0.95, # Shorter horizon for immediate feedback focus
+            ent_coef=0.01, # Maintain exploration
             policy_kwargs=policy_kwargs,
             device=device
         )
         
         # Train
-        total_timesteps = 10000
+        total_timesteps = 10_000_000 # Effectively infinite for continual learning
         logger.info(f"Training for {total_timesteps} timesteps...")
         logger.info("Press 'q' in the GUI window to quit training early.")
         

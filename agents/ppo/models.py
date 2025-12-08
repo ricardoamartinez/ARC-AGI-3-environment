@@ -54,32 +54,45 @@ class ArcViTFeatureExtractor(BaseFeaturesExtractor):
         self.final_proj = nn.Linear(self.flatten_dim, features_dim)
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        # Ensure 0-255 range
-        if observations.max() <= 1.0:
-            observations = observations * 255.0
-            
-        x = observations
+        # Optimization: Remove .max() check to avoid CPU-GPU sync. 
+        # Assume observations are already normalized to [0, 1] by SB3 (standard for uint8 Box).
+        # We need 0-255 scale for colors and some logic.
         
-        # One-Hot Encoding to allow Gradients
-        colors_long = x[:, 0, :, :].long() # (B, 64, 64)
-        deltas = x[:, 1, :, :].float() / 255.0
-        masks  = x[:, 2, :, :].float() / 255.0
-        goals  = x[:, 3, :, :].float() / 255.0
-        vel_x  = (x[:, 4, :, :].float() - 128.0) / 128.0 # Normalize to ~[-1, 1]
-        vel_y  = (x[:, 5, :, :].float() - 128.0) / 128.0
+        # Safe rounding to recover integers
+        x_255 = (observations * 255.0 + 0.5)
         
+        # One-Hot Encoding
+        colors_long = x_255[:, 0, :, :].long() # (B, 64, 64)
         colors_long = torch.clamp(colors_long, 0, 9)
         colors_one_hot = torch.nn.functional.one_hot(colors_long, num_classes=10).float()
         # Permute One-Hot to Channel First: (B, H, W, C) -> (B, C, H, W)
         colors_one_hot = colors_one_hot.permute(0, 3, 1, 2)
+
+        # Other channels are simpler if we use the 0-1 inputs directly where appropriate
+        # Deltas, Masks, Goals are originally 0 or 255 in ObservationBuilder, so 0.0 or 1.0 here.
+        # But wait, goals can be 0-255. So we want them 0-1.
+        # ObservationBuilder: delta[delta > 0] = 255. So it's binary. 0 or 1.
+        # Goals: normalized to 0-255. So here 0-1.
         
-        deltas = deltas.unsqueeze(1) # (B, 1, 64, 64)
-        masks = masks.unsqueeze(1)
-        goals = goals.unsqueeze(1)
-        vel_x = vel_x.unsqueeze(1)
-        vel_y = vel_y.unsqueeze(1)
+        deltas = observations[:, 1:2, :, :] # Keep dim (B, 1, 64, 64)
+        masks  = observations[:, 2:3, :, :]
+        goals  = observations[:, 3:4, :, :]
+        
+        # Velocity was normalized to 0-255 in Env.
+        # We want to map it back to approx [-1, 1].
+        # Env: norm = (v + 10) / 20 * 255
+        # Here: obs = norm / 255 = (v + 10) / 20
+        # obs * 20 - 10 = v.
+        # We want v_norm = v / (something). 
+        # Previous logic: (x_255 - 128) / 128.
+        # x_255 = obs * 255.
+        # (obs * 255 - 128) / 128 = obs * 1.99 - 1.0.
+        
+        vel_x = (observations[:, 4:5, :, :] * 255.0 - 128.0) / 128.0
+        vel_y = (observations[:, 5:6, :, :] * 255.0 - 128.0) / 128.0
         
         # (B, 15, 64, 64)
+        # colors_one_hot is (B, 10, 64, 64)
         x = torch.cat([colors_one_hot, deltas, masks, goals, vel_x, vel_y], dim=1)
         
         # Run CNN
@@ -87,12 +100,10 @@ class ArcViTFeatureExtractor(BaseFeaturesExtractor):
         
         # Store Feature Map for Visualization (Detached)
         # Average across channels to get spatial intensity: (B, 64, 64, 64) -> (B, 64, 64)
-        # Take the last item in batch
-        if not self.training: # Optional optimization? No, we need it during training viz
+        if not self.training: 
              with torch.no_grad():
-                 self.latest_feature_map = feat_map.mean(dim=1).detach() # (B, 64, 64)
+                 self.latest_feature_map = feat_map.mean(dim=1).detach() 
         else:
-             # Detach to avoid leak
              self.latest_feature_map = feat_map.mean(dim=1).detach()
         
         x = self.downsample(feat_map)
