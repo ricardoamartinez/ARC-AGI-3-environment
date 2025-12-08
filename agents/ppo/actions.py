@@ -12,14 +12,16 @@ class ActionProcessor:
         self.last_trigger_val = 0.0
         self.idle_streak = 0
         self.action_cooldown = 0
-        self.cooldown_steps_after_action = 20
-        self.act_threshold = 0.6
+        self.cooldown_steps_after_action = 15 # Balanced cooldown
+        self.act_threshold = 0.7 # Higher threshold to reduce accidental clicks
+        self.is_holding = False # Explicit holding state
 
     def reset(self):
         self.consecutive_action_steps = 0
         self.last_trigger_val = 0.0
         self.idle_streak = 0
         self.action_cooldown = 0
+        self.is_holding = False
 
     def process(self, action_tensor: np.ndarray, current_speed: float) -> Tuple[int, float, float, float, float]:
         """
@@ -38,23 +40,26 @@ class ActionProcessor:
         norm_selection = max(0.0, min(1.0, (selection + 1.0) / 2.0))
         action_idx = int(norm_selection * 10.0)
         action_idx = min(9, max(0, action_idx))
-
+        
+        # Trigger Logic
+        is_trigger_active = trigger > self.act_threshold
         should_act = False
-        if trigger > self.act_threshold and self.action_cooldown == 0:
-            should_act = True
 
-        # Velocity Constraint
-        if current_speed > 2.0:
-            should_act = False
-
-        # Anti-Spam Pulse Logic (Cannot hold button)
-        if (trigger > self.act_threshold) and (self.last_trigger_val > self.act_threshold):
-            should_act = False
+        if is_trigger_active:
+            # Only act on rising edge AND if cooldown is 0
+            if not self.is_holding and self.action_cooldown == 0:
+                # Velocity Constraint
+                if current_speed <= 2.0:
+                    should_act = True
+            
+            self.is_holding = True
+        else:
+            self.is_holding = False
         
         self.last_trigger_val = trigger
 
         final_action_idx = action_idx if should_act else -1
-
+        
         # Update counters
         if final_action_idx != -1:
             self.consecutive_action_steps += 1
@@ -71,7 +76,7 @@ class ActionProcessor:
         if final_action_idx == -1:
             return None
             
-        click_action = final_action_idx <= 3
+        click_action = (final_action_idx <= 3)
         
         if click_action:
             game_action = GameAction.ACTION6

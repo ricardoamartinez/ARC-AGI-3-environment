@@ -266,11 +266,11 @@ def main():
                 if "last_action" in data:
                     last_action_info = data["last_action"]
                     if last_action_info:
-                        # If it's a click (ACTION6 or has x/y)
+                        # If it's a click (ACTION6)
                         aid = last_action_info.get("id")
                         adata = last_action_info.get("data", {})
                         
-                        if aid == 6 or (adata and "x" in adata and "y" in adata):
+                        if aid == 6:
                             last_click_pos = (adata.get("x", 0), adata.get("y", 0))
                             last_click_time = pygame.time.get_ticks()
                             
