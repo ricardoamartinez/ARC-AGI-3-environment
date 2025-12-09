@@ -63,6 +63,9 @@ def main():
     cursor_pos = None # (x, y) target
     visual_cursor_pos = None # (x, y) current interpolated
     
+    # SPATIAL GOAL (User Defined Flag)
+    spatial_goal_pos = None # (x, y) tuple of integers (grid coords)
+    
     # Colors
     BG_COLOR = (0, 0, 0)
     TEXT_COLOR = (255, 255, 255)
@@ -71,8 +74,6 @@ def main():
     GRID_LINE_COLOR = (30, 30, 30)
     
     # ARC Palette (Verified Vibrant)
-    # 0 is typically background (Black). 10 is typically White.
-    # We will dynamically swap these based on which is dominant to ensure BG is always Black.
     BASE_PALETTE = {
         0: (0, 0, 0),       # Black
         1: (30, 144, 255),  # Blue
@@ -285,12 +286,21 @@ def main():
                             selected_heatmap_mode = m
                             show_heatmap = True
                     
-                    # Check if click is in grid area
+                    # Check if click is in grid area -> SET GOAL FLAG
                     if x < GRID_WIDTH:
-                        # During training, the MODEL controls the cursor and clicks.
-                        # Human clicks on the grid are ignored - this is just a visualizer.
-                        # The model steers the cursor via acceleration output and triggers clicks.
-                        pass
+                        gx = int(x / SCALE_FACTOR)
+                        gy = int(y / SCALE_FACTOR)
+                        # Set spatial goal
+                        spatial_goal_pos = (gx, gy)
+                        send_action("SET_SPATIAL_GOAL", x=gx, y=gy)
+                
+                elif event.button == 3: # Right click
+                    x, y = event.pos
+                    if x < GRID_WIDTH:
+                        # Clear spatial goal
+                        if spatial_goal_pos:
+                            spatial_goal_pos = None
+                            send_action("CLEAR_SPATIAL_GOAL")
 
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1:
@@ -326,17 +336,7 @@ def main():
         else:
             manual_pain_val = max(0.0, manual_pain_val - 0.02) # Pain decays moderately
 
-        if abs(manual_dopamine_val) > 0.001 or holding_d_key:
-             # Send update if value is significant or changing
-             # We piggyback on any action or just send dedicated update?
-             # Better to send dedicated update, but don't flood.
-             # Actually, we can send it alongside other messages or sparsely.
-             # Let's send it every frame? No, too heavy.
-             # Send only on change?
-             pass
-        
         # To keep it simple, we send it via SET_MANUAL_DOPAMINE if changed
-        # We need a 'last_sent_dopamine' check
         if 'last_sent_dopamine' not in locals(): last_sent_dopamine = -1
         if abs(manual_dopamine_val - last_sent_dopamine) > 0.01:
             send_action("SET_MANUAL_DOPAMINE", value=manual_dopamine_val)
@@ -348,7 +348,6 @@ def main():
             last_sent_pain = manual_pain_val
 
         # Process incoming messages
-        # Consume ALL messages in queue to catch up to latest state
         while not input_queue.empty():
             line = input_queue.get()
             try:
@@ -364,13 +363,7 @@ def main():
                         if aid == 6:
                             last_click_pos = (adata.get("x", 0), adata.get("y", 0))
                             last_click_time = pygame.time.get_ticks()
-                            
-                            # Do NOT snap visual cursor. 
-                            # The cursor should continue its smooth trajectory.
-                            # The click visualization will appear at last_click_pos.
                         else:
-                            # Reset click if a move action happens? Or keep it?
-                            # Keep it to show history briefly
                             pass
 
                 if "game_id" in data:
@@ -435,9 +428,6 @@ def main():
                             counter = collections.Counter(flat_grid)
                             bg_val, _ = counter.most_common(1)[0]
                             
-                            # Update PALETTE to ensure bg_val maps to Black (0,0,0)
-                            # And swap 0 to take bg_val's original color if needed
-                            
                             # Reset to base first
                             PALETTE = BASE_PALETTE.copy()
                             
@@ -450,10 +440,7 @@ def main():
                                 PALETTE[bg_val] = (0, 0, 0)
                                 
                                 # Set 0 to the original color of the dominant (Swap)
-                                # e.g. If dominant was White, 0 becomes White.
                                 PALETTE[0] = original_bg_color
-                            
-                            # If bg_val is 0, PALETTE[0] is already Black, so we are good.
 
                         # Update scaling only if needed (e.g. first frame) to avoid jitter
                         if SCALE_FACTOR == 1:
@@ -705,9 +692,9 @@ def main():
             curr_y += 10
             draw_line("CONTROLS:", title_font)
             draw_line("ARROWS: Move  SPACE: Use", font, (150, 150, 150))
-            draw_line("ENTER: Confirm  R: Reset", font, (150, 150, 150))
-            draw_line("CLICK: Interact  H: Heatmap", font, (150, 150, 150))
-            draw_line("0-9: Select Channel (Attn, Pain, Obs...)", font, (150, 150, 150))
+            draw_line("CLICK GRID: Set Goal Flag (Green)", font, (0, 255, 0))
+            draw_line("RIGHT CLICK: Remove Goal", font, (255, 0, 0))
+            draw_line("0-9: Select Channel", font, (150, 150, 150))
             draw_line("D: Dopamine  P: Pain  Q: Quit", font, (150, 150, 150))
 
             # --- 2. GRAPHS PANEL ---
@@ -780,12 +767,6 @@ def main():
             handle_rect = pygame.Rect(handle_x - 5, cy - 5, 10, 30)
             pygame.draw.rect(screen, (200, 200, 200), handle_rect)
             
-            # Logic for Slider Interaction (Reuse variable names for event loop compatibility)
-            # We need to update the global detection rects used in the event loop!
-            # Or better: Just use fixed coordinates logic in event loop that matches this.
-            # But the event loop logic calculated positions dynamically based on previous ad-hoc offsets.
-            # We must sync them.
-            
             # Buttons
             cy += 50
             btn_h = 40
@@ -844,11 +825,6 @@ def main():
                 lbl_surf = pygame.font.SysFont("Arial", 12).render(label, True, (255, 255, 255) if not is_active or mode == "pain" else (0, 0, 0))
                 screen.blit(lbl_surf, lbl_surf.get_rect(center=hm_rect.center))
 
-            # Update global rect variables for hit testing in next frame loop
-            # We can't easily export these back to the event loop scope in this structure 
-            # without making them global or calculating them identically in event loop.
-            # Let's standardize the hit test logic in the event loop to match this layout.
-
         # Draw Game Grid
         if current_grids and len(current_grids) > 0:
             current_grid = current_grids[current_grid_idx]
@@ -906,17 +882,26 @@ def main():
                         screen.blit(t_shad, (22, 22))
                         screen.blit(t_surf, (20, 20))
 
-            # Draw Heatmap Overlay (Direct Color Modulation) - DISABLED/REPLACED by above logic
-            # if show_heatmap and selected_heatmap_mode in current_maps: ...
-            
-            # Draw Object Interest Overlay (Yellow Outlines)
-            # REMOVED as per request
-            pass
-            
-            # Highlight mouse hover (REMOVED - duplicate visual)
-            # mx, my = pygame.mouse.get_pos()
-            # if mx < GRID_WIDTH: ...
-            
+            # DRAW SPATIAL GOAL FLAG (If set)
+            if spatial_goal_pos:
+                gx, gy = spatial_goal_pos
+                fx = gx * SCALE_FACTOR + SCALE_FACTOR // 2
+                fy = gy * SCALE_FACTOR + SCALE_FACTOR // 2
+                
+                # Draw a Green Flag Stick
+                pygame.draw.line(screen, (0, 255, 0), (fx, fy), (fx, fy - 20), 3)
+                # Draw Flag Triangle
+                pygame.draw.polygon(screen, (0, 255, 0), [
+                    (fx, fy - 20),
+                    (fx + 15, fy - 15),
+                    (fx, fy - 10)
+                ])
+                # Draw Base Circle
+                pygame.draw.circle(screen, (0, 255, 0), (fx, fy), 5)
+                # Ripple effect
+                radius = (pygame.time.get_ticks() // 50) % 20 + 5
+                pygame.draw.circle(screen, (0, 255, 0), (fx, fy), radius, 1)
+
             # Visualize last click with subtle ripple
             if last_click_pos:
                 lx, ly = last_click_pos
@@ -963,11 +948,6 @@ def main():
                          pygame.draw.rect(screen, (0, 100, 255), rect, 2)
                 
                 # Draw Actual Cursor (Proper Mouse Sprite)
-                # Position is the floating point location
-                # We draw the tip of the cursor at the center of the 'virtual' position
-                # Or should the center of the crosshair be the tip?
-                # Let's align the TIP of the arrow to (px, py) to be precise.
-                
                 cursor_tip_x = cx * SCALE_FACTOR + (SCALE_FACTOR / 2)
                 cursor_tip_y = cy * SCALE_FACTOR + (SCALE_FACTOR / 2)
                 

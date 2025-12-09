@@ -4,73 +4,77 @@ from ..structs import GameAction
 
 class ActionProcessor:
     """
-    Handles processing of raw action tensors into game actions and discrete selections.
-    Manages cooldowns and anti-spam logic.
+    Handles processing of raw action tensors into game actions.
+    Now supports hybrid actions (continuous + discrete).
     """
     def __init__(self):
         self.consecutive_action_steps = 0
         self.last_trigger_val = 0.0
         self.idle_streak = 0
-        self.action_cooldown = 0
-        self.cooldown_steps_after_action = 15 # Balanced cooldown
-        self.act_threshold = 0.7 # Higher threshold to reduce accidental clicks
-        self.is_holding = False # Explicit holding state
+        self.act_threshold = 0.0
+        self.is_holding = False
+        
+        # Smoothing (EMA)
+        self.smooth_x = 0.0
+        self.smooth_y = 0.0
+        # Increased alpha for snappier response (was 0.2)
+        self.smoothing_alpha = 0.6 
 
     def reset(self):
         self.consecutive_action_steps = 0
         self.last_trigger_val = 0.0
         self.idle_streak = 0
-        self.action_cooldown = 0
         self.is_holding = False
+        self.smooth_x = 0.0
+        self.smooth_y = 0.0
 
-    def process(self, action_tensor: np.ndarray, current_speed: float) -> Tuple[int, float, float, float, float]:
+    def process(self, 
+                continuous_actions: np.ndarray, 
+                discrete_action_idx: int,
+                current_speed: float) -> Tuple[int, float, float, float, float]:
         """
-        Parses action tensor.
-        Returns: (final_action_idx, ax, ay, trigger, selection)
+        Parses action inputs.
+        continuous_actions: [ax, ay, trigger]
+        discrete_action_idx: int [0-9]
         """
-        if self.action_cooldown > 0:
-            self.action_cooldown -= 1
-
-        ax = float(action_tensor[0])
-        ay = float(action_tensor[1])
-        trigger = float(action_tensor[2])
-        selection = float(action_tensor[3])
-
-        # Map selection to discrete buckets [0-9]
-        norm_selection = max(0.0, min(1.0, (selection + 1.0) / 2.0))
-        action_idx = int(norm_selection * 10.0)
-        action_idx = min(9, max(0, action_idx))
+        raw_ax = float(continuous_actions[0])
+        raw_ay = float(continuous_actions[1])
+        trigger = float(continuous_actions[2])
+        
+        # Apply EMA Smoothing
+        self.smooth_x = self.smoothing_alpha * raw_ax + (1 - self.smoothing_alpha) * self.smooth_x
+        self.smooth_y = self.smoothing_alpha * raw_ay + (1 - self.smoothing_alpha) * self.smooth_y
+        
+        ax = self.smooth_x
+        ay = self.smooth_y
         
         # Trigger Logic
         is_trigger_active = trigger > self.act_threshold
         should_act = False
 
         if is_trigger_active:
-            # Only act on rising edge AND if cooldown is 0
-            if not self.is_holding and self.action_cooldown == 0:
-                # Velocity Constraint
-                if current_speed <= 2.0:
-                    should_act = True
-            
+            # Semi-Automatic: Only act on rising edge (press) or if holding appropriate tool?
+            # For now, stick to press logic to avoid machine-gunning.
+            if not self.is_holding:
+                should_act = True
             self.is_holding = True
         else:
             self.is_holding = False
         
         self.last_trigger_val = trigger
 
-        final_action_idx = action_idx if should_act else -1
+        final_action_idx = discrete_action_idx if should_act else -1
         
         # Update counters
         if final_action_idx != -1:
             self.consecutive_action_steps += 1
             self.idle_streak = 0
-            self.action_cooldown = self.cooldown_steps_after_action
         else:
-            if self.action_cooldown == 0:
-                self.consecutive_action_steps = 0
+            self.consecutive_action_steps = 0
             self.idle_streak += 1
 
-        return final_action_idx, ax, ay, trigger, selection
+        # Return dummy selection (0.0) for backwards compat if needed
+        return final_action_idx, ax, ay, trigger, 0.0
 
     def get_game_action(self, final_action_idx: int, cursor_x: int, cursor_y: int, game_id: str) -> Optional[GameAction]:
         if final_action_idx == -1:
@@ -90,4 +94,3 @@ class ActionProcessor:
         elif final_action_idx == 9: return GameAction.ACTION7 # ENTER
         
         return None
-
