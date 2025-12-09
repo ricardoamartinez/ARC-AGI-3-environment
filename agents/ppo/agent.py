@@ -113,17 +113,10 @@ class PPOAgent(Agent):
         
         logger.info(f"Fetched {sum(1 for g in games_with_thumbnails if g.get('thumbnail'))} thumbnails")
             
-        gui_script = os.path.join(os.path.dirname(__file__), "..", "templates", "manual_pygame.py")
-        gui_script = os.path.abspath(gui_script)
-        
-        if not os.path.exists(gui_script):
-             logger.error(f"GUI script not found at {gui_script}")
-             return None
-
         try:
             logger.info("Launching Game Selection GUI...")
             proc = subprocess.Popen(
-                [sys.executable, gui_script],
+                [sys.executable, "-m", "agents.manual"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=sys.stderr,
@@ -176,15 +169,10 @@ class PPOAgent(Agent):
 
     def _start_gui(self):
         try:
-            gui_script = os.path.join(os.path.dirname(__file__), "..", "templates", "manual_pygame.py")
-            gui_script = os.path.abspath(gui_script)
+            print(f"DEBUG: Launching Pygame GUI module agents.manual")
             
-            if not os.path.exists(gui_script):
-                 logger.error(f"GUI script not found at {gui_script}")
-                 return
-
             self.gui_process = subprocess.Popen(
-                [sys.executable, gui_script],
+                [sys.executable, "-m", "agents.manual"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=sys.stderr,

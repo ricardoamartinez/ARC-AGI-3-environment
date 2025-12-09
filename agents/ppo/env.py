@@ -69,9 +69,20 @@ class ARCGymEnv(gym.Env):
         self.agent.cursor_x = self.grid_size // 2
         self.agent.cursor_y = self.grid_size // 2
         
+        # Ensure we actually start the game.
+        # If the game was just selected, it might be in 'NOT_STARTED' state.
+        # Sending RESET should fix this.
         frame = self.agent.take_action(GameAction.RESET)
         
+        # If frame is None or error, try again or just proceed (might be network blip)
         if not frame:
+            # Retry once
+            logger.warning("Reset returned no frame, retrying...")
+            time.sleep(1)
+            frame = self.agent.take_action(GameAction.RESET)
+        
+        if not frame:
+            logger.error("Failed to reset game.")
             return np.zeros((self.grid_size, self.grid_size, 8), dtype=np.uint8), {}
             
         self.agent.append_frame(frame)
@@ -427,6 +438,20 @@ class ARCGymEnv(gym.Env):
             reward += 10.0
             # Optional: Auto-reset on win to save time? Or let agent bask in glory?
             # User said "NEVER reset".
+            # BUT: We MUST trigger a reset if the game is over/won to actually play the next level or replay.
+            # If we don't, the grid stays static forever in 'WIN' or 'GAME_OVER' state and no actions (except reset) do anything.
+            # So "Continual Learning" implies the Agent presses Reset, OR the Env auto-resets after a delay.
+            # To enable flow, let's auto-reset after a Win/Loss but treat it as a continuation of the same 'life' (no done=True)
+            # OR we force the agent to learn to press RESET (Action 0).
+            # The error 'GAME_NOT_STARTED_ERROR' suggests the game is waiting for a reset.
+            # So if we are in this state, we should probably force a reset if the agent doesn't do it?
+            # Let's trust the agent to learn it, but give a hint?
+            # Actually, the error `GAME_NOT_STARTED_ERROR` happened because we selected a game but didn't START it?
+            # The select_game_interactively fetches a thumbnail (which does Open -> Reset -> Close).
+            # Then we select it.
+            # Then we call env.reset() -> agent.take_action(RESET).
+            # This should start the game.
+            pass
         elif frame.state == GameState.GAME_OVER:
             reward -= 5.0
             pain += 5.0
