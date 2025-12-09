@@ -160,6 +160,12 @@ class Agent(ABC):
     def take_action(self, action: GameAction) -> Optional[FrameData]:
         """Submits the specific action and gets the next frame."""
         frame_data = self.do_action_request(action).json()
+        
+        # Check for API errors explicitly before validation
+        if "error" in frame_data:
+            logger.error(f"API Error in take_action: {frame_data}")
+            return None
+            
         try:
             frame = FrameData.model_validate(frame_data)
         except ValidationError as e:

@@ -72,18 +72,17 @@ class ARCGymEnv(gym.Env):
         # Ensure we actually start the game.
         # If the game was just selected, it might be in 'NOT_STARTED' state.
         # Sending RESET should fix this.
-        frame = self.agent.take_action(GameAction.RESET)
-        
-        # If frame is None or error, try again or just proceed (might be network blip)
-        if not frame:
-            # Retry once
-            logger.warning("Reset returned no frame, retrying...")
-            time.sleep(1)
+        frame = None
+        for attempt in range(5):
             frame = self.agent.take_action(GameAction.RESET)
+            if frame:
+                break
+            logger.warning(f"Reset attempt {attempt+1} failed, retrying in 2s...")
+            time.sleep(2)
         
         if not frame:
-            logger.error("Failed to reset game.")
-            return np.zeros((self.grid_size, self.grid_size, 8), dtype=np.uint8), {}
+            logger.error("Failed to reset game after multiple attempts.")
+            raise RuntimeError("Failed to reset game - API Error or Network Issue")
             
         self.agent.append_frame(frame)
         self.last_score = frame.score
@@ -184,25 +183,28 @@ class ARCGymEnv(gym.Env):
         frame = None
         if game_action:
             frame = self.agent.take_action(game_action)
-            self.agent.append_frame(frame)
-            self.agent.latest_detected_objects = self.object_tracker.detected_objects
-            
-            action_name = game_action.name
-            is_click = final_action_idx <= 3
-            
-            if final_action_idx == 4: action_name = "UP ↑"
-            elif final_action_idx == 5: action_name = "DOWN ↓"
-            elif final_action_idx == 6: action_name = "LEFT ←"
-            elif final_action_idx == 7: action_name = "RIGHT →"
-            elif final_action_idx == 8: action_name = "SPACE ␣"
-            elif final_action_idx == 9: action_name = "ENTER ↵"
-            elif is_click: action_name = "CLICK 🖱️"
-            
-            self.agent._last_action_viz = {
-                "id": game_action.value,
-                "name": action_name,
-                "data": game_action.action_data.model_dump()
-            }
+            if frame:
+                self.agent.append_frame(frame)
+                self.agent.latest_detected_objects = self.object_tracker.detected_objects
+                
+                action_name = game_action.name
+                is_click = final_action_idx <= 3
+                
+                if final_action_idx == 4: action_name = "UP ↑"
+                elif final_action_idx == 5: action_name = "DOWN ↓"
+                elif final_action_idx == 6: action_name = "LEFT ←"
+                elif final_action_idx == 7: action_name = "RIGHT →"
+                elif final_action_idx == 8: action_name = "SPACE ␣"
+                elif final_action_idx == 9: action_name = "ENTER ↵"
+                elif is_click: action_name = "CLICK 🖱️"
+                
+                self.agent._last_action_viz = {
+                    "id": game_action.value,
+                    "name": action_name,
+                    "data": game_action.action_data.model_dump()
+                }
+            else:
+                logger.warning("Action failed (returned None).")
         else:
             if self.agent.frames:
                  frame = self.agent.frames[-1]
