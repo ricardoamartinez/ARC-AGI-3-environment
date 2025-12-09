@@ -303,21 +303,22 @@ class ARCGymEnv(gym.Env):
 
         # Shape Reward for Approaching Conditioned Objects (Dopamine Magnetism)
         # Check dopamine map at cursor
-        dopamine_map = self.intrinsic_system.get_dopamine_map(
+        dopamine_map_uint8 = self.intrinsic_system.get_dopamine_map(
             self.object_tracker.detected_objects,
             current_grid,
             self.object_tracker
         )
+        dopamine_map = dopamine_map_uint8.astype(np.float32) / 255.0
         
         # Merge Focus Map and LEARNED POSITIVE MANIFOLD into Dopamine Map for Gradient Following
         # If user clicked "Good" in empty space, it's in learned_positive_manifold.
         # We want the agent to gravitate to that strongly.
         
         # Combine maps: Object Conditioning (dopamine_map) + Explicit Spatial Manifold (learned_positive) + Short-term Focus
-        combined_dopamine_map = np.maximum(dopamine_map, self.intrinsic_system.learned_positive_manifold * 2.5)
-        combined_dopamine_map = np.maximum(combined_dopamine_map, self.intrinsic_system.focus_map * 2.5 * 0.5)
+        combined_dopamine_map = np.maximum(dopamine_map, self.intrinsic_system.learned_positive_manifold)
+        combined_dopamine_map = np.maximum(combined_dopamine_map, self.intrinsic_system.focus_map * 0.5)
 
-        cursor_dopamine = combined_dopamine_map[cy_int, cx_int] / 2.5 # 0.0 to 1.0
+        cursor_dopamine = combined_dopamine_map[cy_int, cx_int] # 0.0 to 1.0
         
         # Check Negative Manifold (Explicit Pain Areas)
         cursor_pain = self.intrinsic_system.learned_negative_manifold[cy_int, cx_int]
@@ -333,16 +334,16 @@ class ARCGymEnv(gym.Env):
 
         # --- DOPAMINE GRADIENT REWARD (The "Scent" Trail) ---
         # Reward moving TOWARDS the center of dopamine mass
-        # Threshold lowered to 10 to catch even faint signals in the manifold
-        d_indices = np.where(combined_dopamine_map > 10) 
+        # Threshold lowered to 0.04 (approx 10/255) to catch even faint signals in the manifold
+        d_indices = np.where(combined_dopamine_map > 0.04) 
         if len(d_indices[0]) > 0:
             # Centroid of dopamine - simple and robust
             # Ideally we'd use the peak (argmax) for precision if there's a strong single point
             
-            # Check if there is a "strong" peak (> 200) -> Go for max
+            # Check if there is a "strong" peak (> 0.8) -> Go for max
             # Else go for mean
             max_val = np.max(combined_dopamine_map)
-            if max_val > 150: # Lowered threshold to latch onto peaks sooner
+            if max_val > 0.6: # Lowered threshold to latch onto peaks sooner
                 # Find closest peak to cursor
                 peaks = np.argwhere(combined_dopamine_map >= max_val * 0.9)
                 # Just pick the first one or closest one?
@@ -456,7 +457,7 @@ class ARCGymEnv(gym.Env):
             pass
         elif frame.state == GameState.GAME_OVER:
             reward -= 5.0
-            pain += 5.0
+            pain += 1.0
             # Game Over screen is just another state. Agent must press RESET.
             
         prev_grid = self.last_grid
@@ -468,13 +469,13 @@ class ARCGymEnv(gym.Env):
             "score": frame.score,
             # Dopamine: Show max of map-based (visual) or distance-based (analytical)
             # This ensures the graph reflects the strong signal even if the map is blurry
-            "dopamine": max(cursor_dopamine, dist_dopamine if 'dist_dopamine' in locals() else 0.0), 
-            "manual_dopamine": self.intrinsic_system.manual_dopamine,
+            "dopamine": min(1.0, max(cursor_dopamine, dist_dopamine if 'dist_dopamine' in locals() else 0.0)), 
+            "manual_dopamine": min(1.0, self.intrinsic_system.manual_dopamine),
             
             # Pain: Use total pain experienced at cursor (Manual + Location based + Distance based)
-            "pain": max(pain, cursor_pain * 50.0 if 'cursor_pain' in locals() else 0.0, dist_pain if 'dist_pain' in locals() else 0.0),
+            "pain": min(1.0, max(pain, cursor_pain if 'cursor_pain' in locals() else 0.0, dist_pain if 'dist_pain' in locals() else 0.0)),
             # Show intrinsic pain (includes frustration) rather than just user input
-            "manual_pain": self.intrinsic_system.manual_pain,
+            "manual_pain": min(1.0, self.intrinsic_system.manual_pain),
             
             "plan_confidence": self.intrinsic_system.plan_confidence,
             "current_thought": getattr(self.intrinsic_system, "current_thought", ""),
@@ -487,7 +488,7 @@ class ARCGymEnv(gym.Env):
             }
         }
         
-        obs = self._get_obs(current_grid, prev_grid, final_action_idx, self.intrinsic_system.pain_memory, dopamine_map)
+        obs = self._get_obs(current_grid, prev_grid, final_action_idx, self.intrinsic_system.pain_memory, dopamine_map_uint8)
         
         obs_float = obs.astype(np.float32) / 255.0
         

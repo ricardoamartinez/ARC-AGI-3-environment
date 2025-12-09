@@ -197,9 +197,9 @@ class PPOAgent(Agent):
                                     speed = float(data.get("value", 0.0))
                                     self.training_speed = max(0.0, min(1.0, speed))
                                 elif data.get("action") == "SET_MANUAL_DOPAMINE":
-                                    self.manual_dopamine = float(data.get("value", 0.0))
+                                    self.manual_dopamine = min(1.0, float(data.get("value", 0.0)))
                                 elif data.get("action") == "SET_MANUAL_PAIN":
-                                    self.manual_pain = float(data.get("value", 0.0))
+                                    self.manual_pain = min(1.0, float(data.get("value", 0.0)))
                                 elif data.get("action") == "SET_SPATIAL_GOAL":
                                     x = int(data.get("x", 0))
                                     y = int(data.get("y", 0))

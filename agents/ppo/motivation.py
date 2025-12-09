@@ -190,7 +190,7 @@ class IntrinsicMotivationSystem:
                 max_dist = self.grid_size * 1.414
                 goal_gradient = 1.0 - (dist / max_dist)
                 # Elevate it to be stronger than background
-                goal_gradient = goal_gradient * 5.0 # Max 5.0 at source
+                goal_gradient = goal_gradient * 1.0 # Max 1.0 at source
                 
                 d_map = np.maximum(d_map, goal_gradient)
 
@@ -227,11 +227,11 @@ class IntrinsicMotivationSystem:
             # Maintain relative intensity but ensure visibility
             norm_factor = max(self.dopamine_level, 0.5) 
             # If explicit goal, ensure max intensity is high
-            if self.spatial_goal: norm_factor = 5.0
+            if self.spatial_goal: norm_factor = 1.0
             
             d_map = (d_map / d_max) * norm_factor
         
-        return (np.clip(d_map, 0, 5) * 50).astype(np.uint8) # Allow values > 1.0 before clipping to uint8
+        return (np.clip(d_map, 0, 1) * 255).astype(np.uint8) # Allow values > 1.0 before clipping to uint8
 
     def process_step(self, 
                      env: "ARCGymEnv", 
@@ -288,7 +288,7 @@ class IntrinsicMotivationSystem:
             # Update Negative Manifold
             if 0 <= cx < self.grid_size and 0 <= cy < self.grid_size:
                 # Add heavy penalty to the manifold
-                self.learned_negative_manifold[cy, cx] = min(5.0, self.learned_negative_manifold[cy, cx] + self.manual_pain * 2.0)
+                self.learned_negative_manifold[cy, cx] = min(1.0, self.learned_negative_manifold[cy, cx] + self.manual_pain * 2.0)
                 # Slight spread
                 for dy in [-1, 0, 1]:
                     for dx in [-1, 0, 1]:
@@ -359,7 +359,7 @@ class IntrinsicMotivationSystem:
                 # Add to positive manifold. 
                 # Use a tighter Gaussian splat for precision if the user wants it.
                 # Since we don't know if they want precision or area, we use a 3x3 splat with center bias.
-                self.learned_positive_manifold[cy, cx] = min(5.0, self.learned_positive_manifold[cy, cx] + self.manual_dopamine * 0.05)
+                self.learned_positive_manifold[cy, cx] = min(1.0, self.learned_positive_manifold[cy, cx] + self.manual_dopamine * 0.05)
                 
                 # Spread
                 for dy in [-1, 0, 1]:
@@ -395,7 +395,7 @@ class IntrinsicMotivationSystem:
                 # 1. Update Conditioned Stimulus (The Object)
                 # "This object is associated with reward"
                 old_val = self.conditioned_stimuli.get(target_inv, 0.0)
-                self.conditioned_stimuli[target_inv] = min(5.0, old_val + self.manual_dopamine * 0.05)
+                self.conditioned_stimuli[target_inv] = min(1.0, old_val + self.manual_dopamine * 0.05)
                 
                 # 2. Update Valuable Hashes in Tracker (Global knowledge)
                 env.object_tracker.valuable_object_hashes[target_inv] = \
