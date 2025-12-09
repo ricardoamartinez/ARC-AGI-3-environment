@@ -5,25 +5,24 @@ import numpy as np
 import time
 import queue
 import threading
-from stable_baselines3.common.callbacks import BaseCallback
 from scipy.ndimage import gaussian_filter
 
 logger = logging.getLogger()
 
-class LiveVisualizerCallback(BaseCallback):
+class LiveVisualizerCallback:
     """
     Callback for live visualization of the training process.
-    Uses a separate thread to write to the GUI process to avoid blocking training.
+    Refactored for RTAC (No SB3 dependency).
     """
-    def __init__(self, gui_process, agent, verbose=0):
-        super().__init__(verbose)
+    def __init__(self, gui_process, agent):
         self.gui_process = gui_process
         self.agent = agent
         self._quit_event = None  # Will be set by agent
         self.sleep_time = 0.0 # Delay in seconds
+        self.step_count = 0
         
         # Write Queue
-        self.msg_queue = queue.Queue(maxsize=100) # Increased to prevent dropping action frames at high FPS
+        self.msg_queue = queue.Queue(maxsize=100)
         self._writer_thread = threading.Thread(target=self._write_loop, daemon=True)
         self._writer_thread.start()
 
@@ -43,22 +42,18 @@ class LiveVisualizerCallback(BaseCallback):
             except Exception:
                 pass
 
-    def _on_step(self) -> bool:
+    def on_step(self, info: dict = None) -> bool:
+        self.step_count += 1
+        
         # Check for quit signal
         if self._quit_event and self._quit_event.is_set():
             logger.info("Quit signal detected in callback, stopping training...")
-            return False  # Return False to stop training
+            return False
         
         # --- SPEED CONTROL ---
         if self.sleep_time > 0:
             time.sleep(self.sleep_time)
         
-        # --- OPTIMIZATION REMOVED: Smoothness Priority ---
-        # We update GUI every step for smooth cursor visualization.
-        # The CNN model is fast enough to handle this.
-        # if self.num_timesteps % 4 != 0 and self.sleep_time == 0:
-        #    return True
-
         if self.gui_process and self.gui_process.poll() is None:
             try:
                 # Sync speed
@@ -68,92 +63,43 @@ class LiveVisualizerCallback(BaseCallback):
                 latest_frame = self.agent.frames[-1] if self.agent.frames else None
                 last_action = getattr(self.agent, "_last_action_viz", None)
                 
-                # Extract Saliency Map (Gradient of Choice w.r.t Input)
+                # Extract Saliency / Heatmap
                 heatmap_data = None
+                maps_data = {}
                 
-                # OPTIMIZATION: Only compute heavy Saliency Map every 4 steps to keep framerate high for smooth cursor
-                # Only enable if on GPU to avoid CPU lag
-                is_gpu = self.model.device.type == "cuda"
-                if is_gpu and self.num_timesteps % 4 == 0:
-                    try:
-                        # Get current observation from locals
-                        obs = self.locals.get("new_obs")
-                        
-                        if obs is not None and self.model:
-                            # Convert to tensor
-                            device = self.model.device
-                            obs_tensor = torch.as_tensor(obs).to(device)
-                            if obs_tensor.dtype != torch.float32:
-                                obs_tensor = obs_tensor.float()
-                                
-                            # Enable Gradients
-                            obs_tensor.requires_grad = True
-                            
-                            # Forward Pass
-                            dist = self.model.policy.get_distribution(obs_tensor)
-                            
-                            if hasattr(dist, 'distribution') and hasattr(dist.distribution, 'logits'):
-                                 logits = dist.distribution.logits
-                                 chosen_idx = logits[0].argmax()
-                                 score = logits[0, chosen_idx]
+                # Extract maps from info
+                if info and "maps" in info:
+                    maps_data = info["maps"]
+                
+                # Use latest_feature_map from ArcViTFeatureExtractor if available
+                # Agent has .model which is OnlineActorCritic
+                # .model.features_extractor.latest_feature_map
+                
+                if self.step_count % 4 == 0 and self.agent.model:
+                     try:
+                         feat_map = self.agent.model.features_extractor.latest_feature_map
+                         if feat_map is not None:
+                             # feat_map is (B, 64, 64)
+                             # Take first batch
+                             saliency = feat_map[0] # (64, 64)
+                             
+                             # Normalize
+                             s_min, s_max = saliency.min(), saliency.max()
+                             range_val = s_max - s_min
+                             if range_val > 1e-6:
+                                 saliency = (saliency - s_min) / range_val
+                             else:
+                                 # If uniform, check if active or dead
+                                 if s_max > 0.1: # Threshold for "Active"
+                                     saliency.fill_(1.0)
+                                 else:
+                                     saliency.fill_(0.0)
                                  
-                                 self.model.policy.zero_grad()
-                                 score.backward()
-                                 
-                                 if obs_tensor.grad is not None:
-                                     grads = obs_tensor.grad[0]
-                                     saliency, _ = grads.abs().max(dim=0)
-                                     
-                                     # Normalize
-                                     s_min, s_max = saliency.min(), saliency.max()
-                                     if s_max > s_min:
-                                         saliency = (saliency - s_min) / (s_max - s_min)
-                                     
-                                     # Smooth
-                                     sal_np = saliency.detach().cpu().numpy()
-                                     sal_np = gaussian_filter(sal_np, sigma=1.0)
-                                     
-                                     # Re-normalize strictly 0-1 for GUI visibility
-                                     s_min, s_max = sal_np.min(), sal_np.max()
-                                     if s_max > s_min:
-                                         sal_np = (sal_np - s_min) / (s_max - s_min)
-                                     else:
-                                         sal_np[:] = 0.0
-                                         
-                                     heatmap_data = sal_np.tolist()
-                                     
-                                     # If Saliency is too weak (model ignoring continuous inputs), fallback to Attention
-                                     if s_max < 1e-6:
-                                         heatmap_data = None # Trigger fallback
-
-                            # FALLBACK: Attention Weights (Reliable visualization for discrete inputs)
-                            if heatmap_data is None:
-                                 if hasattr(self.model.policy.features_extractor, 'latest_attention_weights'):
-                                     w = self.model.policy.features_extractor.latest_attention_weights
-                                     if w is not None and w.shape[-1] == 65:
-                                         # Last batch item, CLS token (0) attention to patches (1:)
-                                         patch_attn = w[-1, 0, 1:] # (64,)
-                                         
-                                         # Handle dynamic patch size
-                                         num_tokens = patch_attn.shape[0]
-                                         grid_tokens = int(np.sqrt(num_tokens)) # e.g. 64
-                                         
-                                         patch_attn = patch_attn.reshape(grid_tokens, grid_tokens).detach().cpu().numpy()
-                                         
-                                         # Upscale if needed (Patch > 1)
-                                         scale = 64 // grid_tokens
-                                         if scale > 1:
-                                             patch_attn = np.kron(patch_attn, np.ones((scale, scale)))
-                                         
-                                         # Normalize
-                                         p_min, p_max = patch_attn.min(), patch_attn.max()
-                                         if p_max > p_min:
-                                             patch_attn = (patch_attn - p_min) / (p_max - p_min)
-                                         
-                                         heatmap_data = patch_attn.tolist()
-
-                    except Exception as e:
-                        pass
+                             # Convert to list
+                             heatmap_data = saliency.cpu().numpy().tolist()
+                             maps_data["attention"] = heatmap_data
+                     except Exception:
+                         pass
 
                 # Get Objects & Metrics
                 objects = getattr(self.agent, "latest_detected_objects", [])
@@ -162,44 +108,36 @@ class LiveVisualizerCallback(BaseCallback):
                 manual_dopamine = 0.0
                 pain = 0.0
                 manual_pain = 0.0
+                current_thought = ""
                 
-                try:
-                    infos = self.locals.get("infos", [])
-                    if infos and len(infos) > 0:
-                        info = infos[0]
-                        dopamine = float(info.get("dopamine", 0.0))
-                        plan_confidence = float(info.get("plan_confidence", 0.0))
-                        manual_dopamine = float(info.get("manual_dopamine", 0.0))
-                        pain = float(info.get("pain", 0.0))
-                        manual_pain = float(info.get("manual_pain", 0.0))
-                except:
-                    pass
+                if info:
+                    dopamine = float(info.get("dopamine", 0.0))
+                    plan_confidence = float(info.get("plan_confidence", 0.0))
+                    manual_dopamine = float(info.get("manual_dopamine", 0.0))
+                    pain = float(info.get("pain", 0.0))
+                    manual_pain = float(info.get("manual_pain", 0.0))
+                    current_thought = str(info.get("current_thought", ""))
 
                 if latest_frame and latest_frame.frame:
-                    # Calculate reward mean safely
-                    rew_mean = 0.0
-                    if len(self.model.ep_info_buffer) > 0:
-                        val = np.mean([ep['r'] for ep in self.model.ep_info_buffer])
-                        if not np.isnan(val) and not np.isinf(val):
-                            rew_mean = float(val)
-
                     msg = {
                         "grids": latest_frame.frame,
                         "game_id": self.agent.game_id,
                         "score": latest_frame.score,
-                        "state": f"Step: {self.num_timesteps}",
+                        "state": f"Step: {self.step_count}",
                         "last_action": last_action,
                         "cursor": {"x": self.agent.cursor_x, "y": self.agent.cursor_y},
                         # Only update heatmap if computed
                         **({"attention": heatmap_data} if heatmap_data is not None else {}),
+                        "maps": maps_data,
                         "objects": objects,
                         "metrics": {
                             "dopamine": dopamine,
                             "plan_confidence": plan_confidence,
-                            "reward_mean": rew_mean,
+                            "reward_mean": 0.0, # Removed buffer dependence
                             "manual_dopamine": manual_dopamine,
                             "pain": pain,
-                            "manual_pain": manual_pain
+                            "manual_pain": manual_pain,
+                            "current_thought": current_thought
                         }
                     }
                     
@@ -210,4 +148,3 @@ class LiveVisualizerCallback(BaseCallback):
             except Exception:
                 pass 
         return True
-

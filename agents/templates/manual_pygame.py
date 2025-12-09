@@ -37,6 +37,7 @@ def main():
     game_id = "Waiting..."
     score = 0
     state = "Starting..."
+    current_thought = ""
     waiting_for_server = False
     
     # Selection Mode State
@@ -45,8 +46,10 @@ def main():
     
     # Heatmap State
     current_attention_map = None # 64x64 list of lists
+    current_maps = {} # Dictionary of maps: "attention", "pain", "visit", "value"
     current_objects = [] # List of list of (r, c)
     show_heatmap = False
+    selected_heatmap_mode = "attention" # attention, pain, visit, value
     
     last_action_info = None
     last_click_pos = None
@@ -145,6 +148,19 @@ def main():
     t = threading.Thread(target=read_stdin, daemon=True)
     t.start()
 
+    HEATMAP_COLORS = {
+        "attention": (255, 100, 0),   # Orange/Red
+        "pain": (255, 0, 0),          # Pure Red
+        "visit": (0, 255, 255),       # Cyan
+        "value": (0, 255, 0),         # Green
+        "obs_delta": (255, 255, 0),   # Yellow
+        "obs_focus": (255, 0, 255),   # Magenta
+        "obs_goal": (0, 100, 255),    # Blue
+        "obs_vel_x": (150, 150, 255), # Light Blue
+        "obs_vel_y": (150, 150, 255), # Light Blue
+        "obs_pain": (200, 0, 0)       # Dark Red
+    }
+
     def get_inverse_color(rgb):
         return (255 - rgb[0], 255 - rgb[1], 255 - rgb[2])
 
@@ -175,6 +191,19 @@ def main():
                     send_action("RESET")
                 elif event.key == pygame.K_h:
                     show_heatmap = not show_heatmap
+                elif event.key >= pygame.K_0 and event.key <= pygame.K_9:
+                    idx = event.key - pygame.K_0
+                    if idx == 0: idx = 10 # 0 maps to 10th item
+                    
+                    # Order of maps:
+                    all_modes = ["attention", "pain", "visit", "value", 
+                                 "obs_delta", "obs_focus", "obs_goal", 
+                                 "obs_vel_x", "obs_vel_y", "obs_pain"]
+                    
+                    if 1 <= idx <= len(all_modes):
+                        selected_heatmap_mode = all_modes[idx-1]
+                        show_heatmap = True
+                
                 elif event.key == pygame.K_d:
                     holding_d_key = True
                 elif event.key == pygame.K_p:
@@ -231,8 +260,33 @@ def main():
                     if p_btn_rect.collidepoint(x, y):
                         holding_p_key = True
                     
+                    # Check Heatmap Toggle Buttons
+                    hm_y_start = p_btn_y + 50
+                    
+                    all_modes_keys = [
+                        "attention", "pain", "visit", "value", 
+                        "obs_delta", "obs_focus", "obs_goal", 
+                        "obs_vel_x", "obs_vel_y", "obs_pain"
+                    ]
+                    
+                    cols = 4
+                    hm_btn_w = (slider_w - 15) // cols
+                    hm_btn_h = 25
+                    gap = 5
+
+                    for i, m in enumerate(all_modes_keys):
+                        row = i // cols
+                        col = i % cols
+                        hm_x = slider_x + col * (hm_btn_w + gap)
+                        hm_y = hm_y_start + row * (hm_btn_h + gap)
+                        
+                        hm_rect = pygame.Rect(hm_x, hm_y, hm_btn_w, hm_btn_h)
+                        if hm_rect.collidepoint(x, y):
+                            selected_heatmap_mode = m
+                            show_heatmap = True
+                    
                     # Check if click is in grid area
-                    elif x < GRID_WIDTH:
+                    if x < GRID_WIDTH:
                         # During training, the MODEL controls the cursor and clicks.
                         # Human clicks on the grid are ignored - this is just a visualizer.
                         # The model steers the cursor via acceleration output and triggers clicks.
@@ -333,6 +387,16 @@ def main():
 
                 if "attention" in data:
                     current_attention_map = data["attention"]
+                    current_maps["attention"] = current_attention_map
+                
+                if "maps" in data:
+                    maps = data["maps"]
+                    if isinstance(maps, dict):
+                        for k, v in maps.items():
+                             # Ensure it's a list of lists
+                             if isinstance(v, list):
+                                 current_maps[k] = v
+                
                 if "objects" in data:
                     current_objects = data["objects"]
 
@@ -345,6 +409,7 @@ def main():
                     if "manual_dopamine" in m: metrics_history["manual_dopamine"].append(m["manual_dopamine"])
                     if "pain" in m: metrics_history["pain"].append(m["pain"])
                     if "trigger" in m: metrics_history["trigger"].append(m["trigger"])
+                    if "current_thought" in m: current_thought = m["current_thought"]
                     
                     # Trim
                     for k in metrics_history:
@@ -607,6 +672,9 @@ def main():
             draw_line(f"Game: {game_id}", title_font)
             draw_line(f"Score: {score}", font)
             draw_line(f"State: {state}", font)
+
+            if current_thought:
+                draw_line(f"Thought: {current_thought}", font, (0, 255, 255))
             
             if waiting_for_server:
                 draw_line("Status: Processing...", font, (255, 255, 0))
@@ -639,6 +707,7 @@ def main():
             draw_line("ARROWS: Move  SPACE: Use", font, (150, 150, 150))
             draw_line("ENTER: Confirm  R: Reset", font, (150, 150, 150))
             draw_line("CLICK: Interact  H: Heatmap", font, (150, 150, 150))
+            draw_line("0-9: Select Channel (Attn, Pain, Obs...)", font, (150, 150, 150))
             draw_line("D: Dopamine  P: Pain  Q: Quit", font, (150, 150, 150))
 
             # --- 2. GRAPHS PANEL ---
@@ -738,6 +807,43 @@ def main():
             p_txt = font.render("PAIN (P)", True, (255, 255, 255))
             screen.blit(p_txt, p_txt.get_rect(center=p_rect.center))
             
+            # Heatmap Selectors
+            cy += 50
+            hm_y_start = cy
+            # Dynamic Layout for many buttons
+            all_modes = [
+                ("Attn", "attention"), ("Pain", "pain"), ("Visit", "visit"), ("Val", "value"),
+                ("Delta", "obs_delta"), ("Focus", "obs_focus"), ("Goal", "obs_goal"),
+                ("VelX", "obs_vel_x"), ("VelY", "obs_vel_y"), ("OPain", "obs_pain")
+            ]
+            
+            cols = 4
+            hm_btn_w = (graph_w - 15) // cols
+            hm_btn_h = 25
+            gap = 5
+            
+            for i, (label, mode) in enumerate(all_modes):
+                row = i // cols
+                col = i % cols
+                
+                hm_x = graph_x + col * (hm_btn_w + gap)
+                hm_y = hm_y_start + row * (hm_btn_h + gap)
+                
+                hm_rect = pygame.Rect(hm_x, hm_y, hm_btn_w, hm_btn_h)
+                
+                # Active state
+                is_active = (selected_heatmap_mode == mode) and show_heatmap
+                bg_col = (100, 100, 100)
+                if is_active:
+                    bg_col = HEATMAP_COLORS.get(mode, (200, 200, 200))
+                
+                pygame.draw.rect(screen, bg_col, hm_rect)
+                pygame.draw.rect(screen, (200, 200, 200), hm_rect, 1)
+                
+                # Tiny font for many buttons
+                lbl_surf = pygame.font.SysFont("Arial", 12).render(label, True, (255, 255, 255) if not is_active or mode == "pain" else (0, 0, 0))
+                screen.blit(lbl_surf, lbl_surf.get_rect(center=hm_rect.center))
+
             # Update global rect variables for hit testing in next frame loop
             # We can't easily export these back to the event loop scope in this structure 
             # without making them global or calculating them identically in event loop.
@@ -752,107 +858,61 @@ def main():
             # Draw black background for grid area to clear any artifacts
             pygame.draw.rect(screen, (0, 0, 0), (0, 0, GRID_WIDTH, WINDOW_HEIGHT))
             
-            for r in range(rows):
-                for c in range(cols):
-                    val = current_grid[r][c]
-                    color = PALETTE.get(val, (50, 50, 50))
+            if not show_heatmap:
+                # STANDARD GRID VIEW
+                for r in range(rows):
+                    for c in range(cols):
+                        val = current_grid[r][c]
+                        color = PALETTE.get(val, (50, 50, 50))
+                        
+                        rect = (c * SCALE_FACTOR, r * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR)
+                        pygame.draw.rect(screen, color, rect)
+            else:
+                # CHANNEL VIEW (Opaque, Raw)
+                if selected_heatmap_mode in current_maps:
+                    active_map = current_maps[selected_heatmap_mode]
+                    hm_color = HEATMAP_COLORS.get(selected_heatmap_mode, (255, 255, 255))
                     
-                    rect = (c * SCALE_FACTOR, r * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR)
-                    pygame.draw.rect(screen, color, rect)
-                    # Optional grid lines
-                    # pygame.draw.rect(screen, GRID_LINE_COLOR, rect, 1)
+                    if active_map:
+                        map_rows = len(active_map)
+                        map_cols = len(active_map[0]) if map_rows > 0 else 0
+                        
+                        for r in range(map_rows):
+                            row_data = active_map[r]
+                            for c in range(map_cols):
+                                val = row_data[c]
+                                
+                                # Normalize for visualization if needed
+                                if selected_heatmap_mode == "visit":
+                                    val = min(1.0, val / 5.0)
+                                elif selected_heatmap_mode == "value":
+                                    val = max(0.0, min(1.0, val / 255.0)) # value is 0-255 usually
+                                
+                                # Map Value to Color Intensity (0.0 -> Black, 1.0 -> Full Color)
+                                intensity = max(0.0, min(1.0, val))
+                                
+                                r_val = int(hm_color[0] * intensity)
+                                g_val = int(hm_color[1] * intensity)
+                                b_val = int(hm_color[2] * intensity)
+                                
+                                rect = (c * SCALE_FACTOR, r * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR)
+                                pygame.draw.rect(screen, (r_val, g_val, b_val), rect)
+                                
+                        # Draw Title Overlay
+                        title_str = f"CHANNEL: {selected_heatmap_mode.upper()}"
+                        t_surf = overlay_font.render(title_str, True, hm_color)
+                        t_shad = overlay_font.render(title_str, True, (0,0,0))
+                        # Top Left
+                        screen.blit(t_shad, (22, 22))
+                        screen.blit(t_surf, (20, 20))
 
-            # Draw Heatmap Overlay
-            if show_heatmap and current_attention_map:
-                # 1. Determine dimensions
-                hm_rows = len(current_attention_map)
-                hm_cols = len(current_attention_map[0]) if hm_rows > 0 else 0
-                
-                if hm_rows > 0 and hm_cols > 0:
-                    # Create Surface
-                    hm_surf = pygame.Surface((hm_cols, hm_rows), flags=pygame.SRCALPHA)
-                    
-                    # Fill Surface
-                    for r in range(hm_rows):
-                        row_data = current_attention_map[r]
-                        for c in range(hm_cols):
-                            val = row_data[c] # 0.0 to 1.0
-                            
-                            # Visualization: Heatmap
-                            # Remove cutoff to debug visibility
-                            # Boost alpha
-                            if val < 0.05:
-                                alpha = 0
-                            else:
-                                # Non-linear alpha for visibility
-                                # 0.1 -> 50
-                                # 1.0 -> 200
-                                alpha = int(50 + val * 150)
-                                alpha = min(255, alpha)
-                            
-                            # Use Bright Red/Orange
-                            hm_surf.set_at((c, r), (255, 50, 0, alpha))
-                    
-                    # Scale logic ...
-                    target_w = hm_cols * SCALE_FACTOR
-                    target_h = hm_rows * SCALE_FACTOR
-                    
-                    full_hm = pygame.transform.scale(hm_surf, (target_w, target_h))
-                    
-                    visible_w = cols * SCALE_FACTOR
-                    visible_h = rows * SCALE_FACTOR
-                    
-                    blit_w = min(target_w, visible_w)
-                    blit_h = min(target_h, visible_h)
-                    
-                    screen.blit(full_hm, (0, 0), (0, 0, blit_w, blit_h))
+            # Draw Heatmap Overlay (Direct Color Modulation) - DISABLED/REPLACED by above logic
+            # if show_heatmap and selected_heatmap_mode in current_maps: ...
             
             # Draw Object Interest Overlay (Yellow Outlines)
-            if show_heatmap and current_objects and current_attention_map:
-                # Calculate aggregated score for each object
-                obj_scores = []
-                for obj in current_objects:
-                    score_sum = 0
-                    count = 0
-                    for r, c in obj:
-                        if r < len(current_attention_map) and c < len(current_attention_map[0]):
-                            score_sum += current_attention_map[r][c]
-                            count += 1
-                    
-                    avg_score = score_sum / count if count > 0 else 0
-                    obj_scores.append((avg_score, obj))
-                
-                # Sort by score
-                obj_scores.sort(key=lambda x: x[0], reverse=True)
-                
-                # Draw top 3 objects
-                for i, (score, obj) in enumerate(obj_scores[:3]):
-                    if score < 0.1: continue # Ignore low interest
-                    
-                    # Draw Outline
-                    # Naive approach: draw rect for each pixel, or convex hull
-                    # Let's draw rects for each pixel for simplicity
-                    
-                    # Color based on rank
-                    if i == 0: color = (0, 255, 0) # Green (Top)
-                    elif i == 1: color = (255, 255, 0) # Yellow
-                    else: color = (255, 165, 0) # Orange
-                    
-                    for r, c in obj:
-                        rect = (c * SCALE_FACTOR, r * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR)
-                        pygame.draw.rect(screen, color, rect, 2)
-                    
-                    # Label the object with its score
-                    if obj:
-                         # Find center
-                        rs = [p[0] for p in obj]
-                        cs = [p[1] for p in obj]
-                        cr = sum(rs) / len(rs)
-                        cc = sum(cs) / len(cs)
-                        
-                        txt = font.render(f"{score:.2f}", True, (255, 255, 255))
-                        screen.blit(txt, (cc * SCALE_FACTOR, cr * SCALE_FACTOR))
-
+            # REMOVED as per request
+            pass
+            
             # Highlight mouse hover (REMOVED - duplicate visual)
             # mx, my = pygame.mouse.get_pos()
             # if mx < GRID_WIDTH: ...
