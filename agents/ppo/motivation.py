@@ -3,6 +3,8 @@ import time
 import numpy as np
 from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 from .utils import find_connected_components
+from .cppn import CPPN, generate_cppn_map
+from .hypothesis import HypothesisEngine
 
 if TYPE_CHECKING:
     from .env import ARCGymEnv
@@ -57,6 +59,15 @@ class IntrinsicMotivationSystem:
         self.modality_bias = 0.0 # -1.0 (Keyboard) to 1.0 (Cursor)
         self.modality_sensitivity = 0.5 # Slower adaptation to prevent jitter
 
+        # CPPN-based Intrinsic Motivation (Picbreeder)
+        # Stores the currently active CPPN-generated reward map
+        self.active_cppn: Optional[CPPN] = None
+        self.cppn_reward_map: Optional[np.ndarray] = None
+        self.cppn_strength = 1.0
+        
+        # Hypothesis Engine (Reasoning)
+        self.hypothesis_engine = HypothesisEngine()
+
     def reset(self):
         self.dopamine_level = 0.0
         self.manual_dopamine = 0.0
@@ -82,6 +93,9 @@ class IntrinsicMotivationSystem:
         self.locked_plan = None
         self.plan_confidence = 0.0
         self.spatial_goal = None
+        
+        # We keep the CPPN across resets (it's a high-level goal)
+        # unless explicitly cleared.
 
     def update_dopamine(self, amount: float):
         self.dopamine_level = max(0.0, min(1.0, self.dopamine_level + amount))
@@ -95,6 +109,13 @@ class IntrinsicMotivationSystem:
         # Very slow decay for manifolds to allow "painting"
         self.learned_positive_manifold *= 0.999
         self.learned_negative_manifold *= 0.999
+
+    def set_cppn(self, cppn: CPPN):
+        """Sets the active CPPN and pre-generates the reward map."""
+        self.active_cppn = cppn
+        # Generate map on CPU for now (64x64 is small)
+        self.cppn_reward_map = generate_cppn_map(cppn, self.grid_size, self.grid_size)
+        self.current_thought = "Motivation updated: New Spatial Goal."
 
     def get_value_map(self) -> np.ndarray:
         """
@@ -193,6 +214,18 @@ class IntrinsicMotivationSystem:
                 goal_gradient = goal_gradient * 1.0 # Max 1.0 at source
                 
                 d_map = np.maximum(d_map, goal_gradient)
+        
+        # 5. Add CPPN Reward Map (Picbreeder)
+        if self.cppn_reward_map is not None:
+             cppn_contribution = self.cppn_reward_map * self.cppn_strength
+             d_map = np.maximum(d_map, cppn_contribution)
+             
+        # 6. Add Hypothesis Map (Reasoning)
+        # Generate map dynamically from current grid based on hypothesis
+        h_map = self.hypothesis_engine.get_reward_map(grid)
+        if h_map is not None:
+            # Strong signal for reasoned hypothesis
+            d_map = np.maximum(d_map, h_map * 1.0)
 
         # Manual Box Blur (Numpy only) to avoid scipy dependency and potential lag
         # A simple convolution with a kernel of ones
@@ -248,10 +281,33 @@ class IntrinsicMotivationSystem:
         """
         self.decay()
         
-        # --- SPATIAL COVERAGE ---
+        # --- PRE-CALCULATE CURSOR DATA ---
         cx = int(round(env.agent.cursor_x))
         cy = int(round(env.agent.cursor_y))
         
+        # Identify object under cursor
+        cursor_obj_invariant = "none"
+        cursor_obj_hash = "none"
+        cursor_color = -1
+        
+        target_grid = last_grid if (click_action and last_grid is not None) else current_grid
+        if 0 <= cy < self.grid_size and 0 <= cx < self.grid_size:
+            cursor_color = target_grid[cy, cx]
+        
+        # Get hash at current location
+        obj_at_cursor_hash = env.object_tracker.get_object_hash_at(cy, cx, current_grid)
+        
+        # Let's find invariant hash
+        obj_at_cursor_inv = "none"
+        if obj_at_cursor_hash:
+             # Find pixels
+             for obj in env.object_tracker.detected_objects:
+                 if (cy, cx) in obj:
+                     color = current_grid[cy, cx]
+                     obj_at_cursor_inv = env.object_tracker.get_invariant_hash(obj, color)
+                     break
+
+        # --- SPATIAL COVERAGE ---
         if 0 <= cx < self.grid_size and 0 <= cy < self.grid_size:
             self.spatial_visitation_map[cy, cx] += 1.0
             # Spread
@@ -280,6 +336,15 @@ class IntrinsicMotivationSystem:
 
         # --- PAIN HANDLING ---
         if self.manual_pain > 0:
+            # Update Hypothesis Engine (Negative)
+            context = {
+                "x": cx, 
+                "y": cy, 
+                "color": cursor_color,
+                "grid_shape": (self.grid_size, self.grid_size)
+            }
+            self.hypothesis_engine.update(-self.manual_pain, context)
+            
             self.dopamine_level = 0.0
             self.plan_confidence = 0.0
             self.locked_plan = None
@@ -318,24 +383,7 @@ class IntrinsicMotivationSystem:
             self.current_thought = "Pain detected! Marking as BAD."
         
         # --- INTERACTION HISTORY LOGGING ---
-        # Identify object under cursor
-        cursor_obj_invariant = "none"
-        cursor_obj_hash = "none"
-        
-        target_grid = last_grid if (click_action and last_grid is not None) else current_grid
-        
-        # Get hash at current location
-        obj_at_cursor_hash = env.object_tracker.get_object_hash_at(cy, cx, current_grid)
-        
-        # Let's find invariant hash
-        obj_at_cursor_inv = "none"
-        if obj_at_cursor_hash:
-             # Find pixels
-             for obj in env.object_tracker.detected_objects:
-                 if (cy, cx) in obj:
-                     color = current_grid[cy, cx]
-                     obj_at_cursor_inv = env.object_tracker.get_invariant_hash(obj, color)
-                     break
+        # (Data already calculated at top of function)
         
         self.interaction_history.append({
             "step": env.current_step,
@@ -351,8 +399,19 @@ class IntrinsicMotivationSystem:
 
         # --- PAVLOVIAN CONDITIONING (Dopamine Handling) ---
         if self.manual_dopamine > 0.1:
-            self.current_thought = "Good feedback! Conditioning..."
+            self.current_thought = "Good feedback! Reasoning..."
             reward += self.manual_dopamine * 0.05 # Immediate Reward (Drastically reduced)
+            
+            # Update Hypothesis Engine
+            context = {
+                "x": cx, 
+                "y": cy, 
+                "color": cursor_color,
+                "grid_shape": (self.grid_size, self.grid_size)
+            }
+            self.hypothesis_engine.update(self.manual_dopamine, context)
+            if self.hypothesis_engine.current_hypothesis:
+                self.current_thought = f"Idea: {self.hypothesis_engine.current_hypothesis.name}?"
             
             # Update Positive Manifold (Spatial Learning)
             if 0 <= cx < self.grid_size and 0 <= cy < self.grid_size:

@@ -19,6 +19,7 @@ from ..structs import FrameData, GameAction, GameState
 from .env import ARCGymEnv
 from .callbacks import LiveVisualizerCallback
 from .models import OnlineActorCritic
+from .cppn import CPPN
 
 logger = logging.getLogger()
 
@@ -165,6 +166,7 @@ class PPOAgent(Agent):
         self.manual_dopamine = 0.0
         self.manual_pain = 0.0
         self.spatial_goal = None # (x, y)
+        self._breed_trigger = False
         self._start_gui()
 
     def _start_gui(self):
@@ -206,6 +208,14 @@ class PPOAgent(Agent):
                                     self.spatial_goal = (x, y)
                                 elif data.get("action") == "CLEAR_SPATIAL_GOAL":
                                     self.spatial_goal = None
+                                elif data.get("action") == "BREED_MOTIVATION":
+                                    # Trigger mutation of the Intrinsic Motivation CPPN
+                                    # We need access to the env's intrinsic system.
+                                    # Since env is created in main(), we can't easily access it here
+                                    # UNLESS we store it or pass a callback.
+                                    # We can set a flag that the main loop checks.
+                                    self._breed_trigger = True
+                                    
                             except json.JSONDecodeError:
                                 pass
                         except Exception as e:
@@ -283,19 +293,33 @@ class PPOAgent(Agent):
             while not self._quit_event.is_set():
                 step_count += 1
                 
+                # Check for Breeding Trigger
+                if self._breed_trigger:
+                    self._breed_trigger = False
+                    logger.info("Mutation Triggered: Evolving Motivation CPPN")
+                    if env.intrinsic_system.active_cppn is None:
+                        # Create new random CPPN
+                        new_cppn = CPPN(output_dim=1)
+                        env.intrinsic_system.set_cppn(new_cppn)
+                    else:
+                        # Mutate existing
+                        env.intrinsic_system.active_cppn.mutate(magnitude=0.5)
+                        # Re-set to update the map
+                        env.intrinsic_system.set_cppn(env.intrinsic_system.active_cppn)
+                
                 # 1. Forward Pass with Recurrence
                 # Returns: mean_cont, std_cont, logits_disc, value, (next_hx, next_cx)
                 mean_cont, std_cont, logits_disc, value, (next_hx, next_cx) = self.model(obs_tensor, (hx, cx))
                 
                 # NaN Check
                 if torch.isnan(mean_cont).any() or torch.isnan(std_cont).any():
-                     logger.error("NaN detected in model output! Resetting model parameters...")
-                     self.model.apply(self.model._init_weights)
-                     self.target_model.load_state_dict(self.model.state_dict())
-                     traces = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
+                     logger.error("NaN detected in model output! Skipping step and zeroing gradients...")
+                     self.model.zero_grad()
+                     # Reset hidden state to be safe, but keep weights
                      hx = torch.zeros(1, hidden_dim, device=device)
                      cx = torch.zeros(1, hidden_dim, device=device)
-                     mean_cont, std_cont, logits_disc, value, (next_hx, next_cx) = self.model(obs_tensor, (hx, cx))
+                     # Continue to next step
+                     continue
 
                 # Sample Actions
                 # Dynamic Entropy / Noise Control
@@ -366,11 +390,14 @@ class PPOAgent(Agent):
                     current_lr = lr * 2.0 if is_urgent else lr
 
                     for _ in range(update_steps):
+                        # Global Gradient Clipping (Pre-update)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                        
                         for name, param in self.model.named_parameters():
                             if param.grad is not None:
                                 clipped_grad = torch.clamp(param.grad, -1.0, 1.0)
                                 traces[name] = gamma * lam * traces[name] + clipped_grad
-                                traces[name] = torch.clamp(traces[name], -10.0, 10.0)
+                                traces[name] = torch.clamp(traces[name], -5.0, 5.0) # Reduced from 10.0
                                 param.grad = -d * traces[name]
                             else:
                                 traces[name] = gamma * lam * traces[name]

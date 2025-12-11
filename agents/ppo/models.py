@@ -46,11 +46,16 @@ class ArcViTFeatureExtractor(nn.Module):
         self.grid_size = 64
         self.features_dim = features_dim
         
-        # Differentiable Color Embedding
-        self.color_embedding = nn.Embedding(10, 10)
+        # Differentiable Color Embedding (Expanded to 16 colors for ARC-AGI-3)
+        self.color_embedding = nn.Embedding(16, 16)
         
         # Visual Stream (CNN)
-        self.visual_channels = 17
+        # Channels: 16 (Color) + 1 (Delta) + 1 (Focus) + 1 (Goal) + 2 (Vel) + 2 (Pain/Dopa) + 2 (Bias) = 23?
+        # observation_space shape is (64, 64, 10).
+        # Channel 0 is Color (Indices). We embed it -> 16 channels.
+        # Channels 1-9 are scalar maps.
+        # Total visual channels = 16 + 9 = 25.
+        self.visual_channels = 25
         
         self.visual_cnn = nn.Sequential(
             nn.Conv2d(self.visual_channels, 32, kernel_size=3, padding=1),
@@ -98,21 +103,13 @@ class ArcViTFeatureExtractor(nn.Module):
         
         # 1. Extract Visual Inputs & Differentiable Embedding
         colors_long = x_255[:, 0, :, :].long()
-        colors_long = torch.clamp(colors_long, 0, 9)
+        colors_long = torch.clamp(colors_long, 0, 15) # Support up to 16 colors
         colors_emb = self.color_embedding(colors_long).permute(0, 3, 1, 2)
         
-        deltas = observations[:, 1:2, :, :]
-        focus  = observations[:, 2:3, :, :]
-        goals  = observations[:, 3:4, :, :]
+        # Other channels: 1 to 9
+        other_channels = observations[:, 1:, :, :] # (B, 9, H, W)
         
-        vel_x = (observations[:, 4:5, :, :] * 255.0 - 128.0) / 128.0
-        vel_y = (observations[:, 5:6, :, :] * 255.0 - 128.0) / 128.0
-        
-        # Add Spatial Pain and Dopamine
-        pain_map = observations[:, 8:9, :, :]
-        dopamine_map = observations[:, 9:10, :, :]
-        
-        visual_x = torch.cat([colors_emb, deltas, focus, goals, vel_x, vel_y, pain_map, dopamine_map], dim=1)
+        visual_x = torch.cat([colors_emb, other_channels], dim=1)
         
         # 2. Extract Somatic Inputs
         somatic_map = observations[:, 6:10, :, :]

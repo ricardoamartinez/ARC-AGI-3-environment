@@ -31,6 +31,7 @@ class ARCGymEnv(gym.Env):
         self.max_steps = max_steps
         self.current_step = 0
         self.last_score = 0
+        self.last_state = GameState.NOT_PLAYED
         self.grid_size = 64
         
         # Components
@@ -68,6 +69,8 @@ class ARCGymEnv(gym.Env):
         
         self.agent.cursor_x = self.grid_size // 2
         self.agent.cursor_y = self.grid_size // 2
+        
+        self.last_state = GameState.NOT_PLAYED
         
         # Ensure we actually start the game.
         # If the game was just selected, it might be in 'NOT_STARTED' state.
@@ -437,28 +440,23 @@ class ARCGymEnv(gym.Env):
         terminated = False # CONTINUAL LEARNING: Never terminate. Agent must learn to reset.
         truncated = False 
         
-        if frame.state == GameState.WIN:
-            reward += 10.0
-            # Optional: Auto-reset on win to save time? Or let agent bask in glory?
-            # User said "NEVER reset".
-            # BUT: We MUST trigger a reset if the game is over/won to actually play the next level or replay.
-            # If we don't, the grid stays static forever in 'WIN' or 'GAME_OVER' state and no actions (except reset) do anything.
-            # So "Continual Learning" implies the Agent presses Reset, OR the Env auto-resets after a delay.
-            # To enable flow, let's auto-reset after a Win/Loss but treat it as a continuation of the same 'life' (no done=True)
-            # OR we force the agent to learn to press RESET (Action 0).
-            # The error 'GAME_NOT_STARTED_ERROR' suggests the game is waiting for a reset.
-            # So if we are in this state, we should probably force a reset if the agent doesn't do it?
-            # Let's trust the agent to learn it, but give a hint?
-            # Actually, the error `GAME_NOT_STARTED_ERROR` happened because we selected a game but didn't START it?
-            # The select_game_interactively fetches a thumbnail (which does Open -> Reset -> Close).
-            # Then we select it.
-            # Then we call env.reset() -> agent.take_action(RESET).
-            # This should start the game.
-            pass
-        elif frame.state == GameState.GAME_OVER:
-            reward -= 5.0
-            pain += 1.0
-            # Game Over screen is just another state. Agent must press RESET.
+        # Reward Logic for Terminal States (Edge Detection)
+        if frame.state != self.last_state:
+            if frame.state == GameState.WIN:
+                reward += 10.0
+                self.intrinsic_system.current_thought = "I WON! Now what?"
+            elif frame.state == GameState.GAME_OVER:
+                reward -= 5.0
+                pain += 1.0
+                self.intrinsic_system.current_thought = "Game Over... I should Reset."
+        
+        # If stuck in terminal state, slight pressure to reset
+        if frame.state in [GameState.WIN, GameState.GAME_OVER]:
+             # No huge rewards, just existence
+             pass
+        
+        # Store state for next step
+        self.last_state = frame.state
             
         prev_grid = self.last_grid
         self.last_grid = current_grid
@@ -511,10 +509,47 @@ class ARCGymEnv(gym.Env):
         return obs, reward, terminated, truncated, metrics
 
     def _get_obs(self, current_grid: np.ndarray, prev_grid: Optional[np.ndarray], last_action_idx: int = -1, pain: Any = 0.0, dopamine_map: Any = 0.0) -> np.ndarray:
+         # Pad/Resize current_grid to 64x64 if needed
+         h, w = current_grid.shape
+         target_size = self.grid_size
+         
+         padded_grid = np.zeros((target_size, target_size), dtype=np.uint8)
+         # Center crop or Center pad
+         pad_y = (target_size - h) // 2
+         pad_x = (target_size - w) // 2
+         
+         # Safe copy with bounds check
+         # Case 1: Grid smaller than Target (Pad)
+         # Case 2: Grid larger than Target (Crop)
+         
+         src_y_start = max(0, -pad_y)
+         src_x_start = max(0, -pad_x)
+         src_y_end = min(h, h - (h - target_size) - src_y_start) if h > target_size else h
+         src_x_end = min(w, w - (w - target_size) - src_x_start) if w > target_size else w
+         
+         dst_y_start = max(0, pad_y)
+         dst_x_start = max(0, pad_x)
+         
+         # Calculate dimensions to copy
+         copy_h = min(src_y_end - src_y_start, target_size - dst_y_start)
+         copy_w = min(src_x_end - src_x_start, target_size - dst_x_start)
+         
+         if copy_h > 0 and copy_w > 0:
+             padded_grid[dst_y_start:dst_y_start+copy_h, dst_x_start:dst_x_start+copy_w] = \
+                 current_grid[src_y_start:src_y_start+copy_h, src_x_start:src_x_start+copy_w]
+         
+         # Also pad/resize prev_grid if it exists
+         padded_prev = None
+         if prev_grid is not None:
+             padded_prev = np.zeros((target_size, target_size), dtype=np.uint8)
+             if copy_h > 0 and copy_w > 0:
+                 padded_prev[dst_y_start:dst_y_start+copy_h, dst_x_start:dst_x_start+copy_w] = \
+                     prev_grid[src_y_start:src_y_start+copy_h, src_x_start:src_x_start+copy_w]
+
          value_map = self.intrinsic_system.get_value_map()
          return self.obs_builder.build(
-            current_grid=current_grid,
-            last_grid=prev_grid,
+            current_grid=padded_grid,
+            last_grid=padded_prev,
             focus_map=self.intrinsic_system.focus_map,
             detected_objects=self.object_tracker.detected_objects,
             valuable_hashes=self.object_tracker.valuable_object_hashes,
