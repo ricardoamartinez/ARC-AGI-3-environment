@@ -193,9 +193,9 @@ class GameRenderer:
         curr_y += 10
         draw_line("CONTROLS:", "title")
         draw_line("ARROWS: Move  SPACE: Use", "normal", (150, 150, 150))
-        draw_line("CLICK: Goal  R-CLICK: Clear", "normal", (0, 255, 0))
+        draw_line("CLICK: Set Goal  R-CLICK: Clear", "normal", (0, 255, 0))
         draw_line("0-9: Select Channel", "normal", (150, 150, 150))
-        draw_line("D: Dopamine P: Pain Q: Quit", "normal", (150, 150, 150))
+        draw_line("D: Dopamine  P: Pain  G: Goal shaping  Q: Quit", "normal", (150, 150, 150))
 
     def _draw_graphs(self, state: GameState, x_start):
         # We assume the main App class handles the Graph object creation/updating, 
@@ -206,13 +206,16 @@ class GameRenderer:
         GRAPHS_Y_START = 350
         CONTROLS_Y_START = self.screen.get_height() - 200
         
+        # Graphs available from the simplified PPO loop.
         graph_titles = [
-            ("Dopamine (AI)", "dopamine", (0, 255, 255), 0.0, 1.0),
-            ("Dopamine (Human)", "manual_dopamine", (255, 100, 100), 0.0, 1.0),
-            ("Pain Level", "pain", (255, 0, 0), 0.0, 10.0),
-            ("Action Urge", "trigger", (255, 255, 0), -1.0, 1.0),
-            ("Confidence", "confidence", (255, 0, 255), 0.0, 1.0),
-            ("Avg Reward", "reward", (0, 255, 0), None, None)
+            ("Reward", "reward", (0, 255, 0), None, None),
+            ("Dopamine (Human)", "manual_dopamine", (255, 120, 120), 0.0, 1.0),
+            ("Pain (Human)", "manual_pain", (255, 0, 0), 0.0, 1.0),
+            ("Action Urge (Trigger)", "trigger", (255, 255, 0), -1.0, 1.0),
+            ("Cursor Speed", "cursor_speed", (200, 200, 200), 0.0, None),
+            ("Action Energy", "action_energy", (180, 180, 255), 0.0, None),
+            ("Goal Distance", "goal_dist", (0, 255, 255), 0.0, None),
+            ("Goal Progress", "goal_progress", (0, 180, 255), None, None),
         ]
 
         avail_h = CONTROLS_Y_START - GRAPHS_Y_START - 20
@@ -293,16 +296,18 @@ class GameRenderer:
         self.screen.blit(t_surf, (20, 20))
 
     def _draw_overlays(self, state: GameState, scale: int):
-        # Goal Flag
+        # Goal Flag (training target)
         if state.spatial_goal_pos:
             gx, gy = state.spatial_goal_pos
             fx = gx * scale + scale // 2
             fy = gy * scale + scale // 2
-            
+
             pygame.draw.line(self.screen, (0, 255, 0), (fx, fy), (fx, fy - 20), 3)
-            pygame.draw.polygon(self.screen, (0, 255, 0), [
-                (fx, fy - 20), (fx + 15, fy - 15), (fx, fy - 10)
-            ])
+            pygame.draw.polygon(
+                self.screen,
+                (0, 255, 0),
+                [(fx, fy - 20), (fx + 15, fy - 15), (fx, fy - 10)],
+            )
             pygame.draw.circle(self.screen, (0, 255, 0), (fx, fy), 5)
             radius = (pygame.time.get_ticks() // 50) % 20 + 5
             pygame.draw.circle(self.screen, (0, 255, 0), (fx, fy), radius, 1)

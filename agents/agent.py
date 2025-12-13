@@ -138,7 +138,9 @@ class Agent(ABC):
 
     def do_action_request(self, action: GameAction) -> Response:
         data = action.action_data.model_dump()
-        if action == GameAction.RESET:
+        # Some API endpoints require card_id for all actions (not only RESET) to ensure
+        # commands are routed to the correct scorecard session / game instance.
+        if self.card_id:
             data["card_id"] = self.card_id
         if self.guid:
             data["guid"] = self.guid
@@ -163,6 +165,24 @@ class Agent(ABC):
         
         # Check for API errors explicitly before validation
         if "error" in frame_data:
+            # Common failure mode during interactive play: game exists but isn't started.
+            # Never auto-reset unless explicitly enabled (online continual learning).
+            allow_auto_reset = os.environ.get("ALLOW_AUTO_RESET", "0") == "1"
+            if (
+                allow_auto_reset
+                and frame_data.get("error") == "GAME_NOT_STARTED_ERROR"
+                and action != GameAction.RESET
+            ):
+                logger.warning(
+                    "Game not started; auto-sending RESET to recover (ALLOW_AUTO_RESET=1)."
+                )
+                reset_data = self.do_action_request(GameAction.RESET).json()
+                if "error" not in reset_data:
+                    try:
+                        return FrameData.model_validate(reset_data)
+                    except ValidationError as e:
+                        logger.warning(f"Incoming RESET frame did not validate: {e}")
+                        return None
             logger.error(f"API Error in take_action: {frame_data}")
             return None
             

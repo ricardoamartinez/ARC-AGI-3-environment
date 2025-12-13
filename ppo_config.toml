@@ -1,0 +1,81 @@
+# PPO/SAC configuration (loaded automatically by `main.py` if present).
+# Env vars still override these values.
+
+[trainer]
+name = "rtac"                # online TD actor-critic update every step
+action_mode = "vel"
+require_goal = true
+
+[features]
+mode = "somatic"             # ultra-light; uses explicit cursor/goal coords
+dim = 64                     # small = faster per-step backprop
+disable_lstm = true          # feedforward (cheapest), reduces UI lag
+
+[logging]
+log_every = 50
+ui_fps = 60
+ui_grid_fps = 5
+
+[reward]
+# Dense continuing reward (no terminals). This is what the new RTAC trainer learns from.
+mode = "dense"
+scale = 2.0
+goal_radius = 0.06
+arrival_bonus = 2.0
+action_l2_penalty = 0.001
+vel_l2_penalty = 0.12
+jerk_l2_penalty = 0.005
+
+# Optional: extra wall penalty to avoid corner camping.
+wall_penalty = 0.02
+
+[physics]
+# PD controller + damping + "stickiness" to stop jitter at the goal.
+# CursorGoalEnv-style world dynamics (reference):
+bounds = 1.0
+max_speed = 0.06
+vel_response = 1.0
+
+# (The following physics params are used by other action modes; vel-mode ignores them.)
+damping = 0.05
+pd_kp = 0.35
+pd_kd = 0.25
+stop_radius = 0.75
+stop_speed = 0.05
+speed_scale_max = 3.0
+target_ema_alpha = 0.25
+
+[sac]
+lr = 1e-3
+gamma = 0.99
+tau = 0.005
+batch_size = 128
+buffer_size = 10000
+warmup = 200
+updates_per_step = 4
+auto_alpha = true
+target_entropy = -0.2
+features = "somatic" # fastest for this cursor-to-goal task
+clear_buffer_on_goal_change = true
+goal_change_burst_updates = 500
+deterministic_after_steps = 500
+async_updates = true
+infer_device = "cpu"          # keeps UI smooth (no GPU contention)
+sync_every_updates = 50       # how often learner syncs weights to the inference actor
+
+[rtac]
+lr = 3e-4
+gamma = 0.97
+td_lambda = 0.0
+value_coef = 0.5
+entropy_coef = 0.001
+adv_clip = 3.0
+max_grad_norm = 1.0
+device = "cuda"              # learner device (fast backprop)
+async_updates = true         # no-lag UI: learning runs in background
+infer_device = "cpu"         # inference-only model for UI loop
+sync_every_updates = 25      # tradeoff: lower = faster visible adaptation, higher = less overhead
+queue_size = 512
+torch_num_threads = 1
+
+

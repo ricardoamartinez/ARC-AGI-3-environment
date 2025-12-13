@@ -1,16 +1,23 @@
 # ruff: noqa: E402
+import os
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=".env.example")
+# IMPORTANT:
+# `.env.example` is a template and may contain experimental flags (like headless mode).
+# Loading it at runtime can unintentionally force behavior (e.g., disabling the UI).
+# So we load only `.env` by default. If you *really* want `.env.example`, set
+# LOAD_ENV_EXAMPLE=1 in your environment.
+if os.environ.get("LOAD_ENV_EXAMPLE", "0") == "1":
+    load_dotenv(dotenv_path=".env.example")
 load_dotenv(dotenv_path=".env", override=True)
 
 import argparse
 import json
 import logging
-import os
 import signal
 import sys
 import threading
+import time
 from functools import partial
 from types import FrameType
 from typing import Optional
@@ -19,12 +26,15 @@ import requests
 
 from agents import AVAILABLE_AGENTS, Swarm
 from agents.tracing import initialize as init_agentops
+from agents.ppo.config import apply_ppo_config_if_present
 
 logger = logging.getLogger()
 
-SCHEME = os.environ.get("SCHEME", "http")
-HOST = os.environ.get("HOST", "localhost")
-PORT = os.environ.get("PORT", 8001)
+# Default to the public ARC-AGI-3 server. You can override with SCHEME/HOST/PORT
+# if you're running a local API.
+SCHEME = os.environ.get("SCHEME", "https")
+HOST = os.environ.get("HOST", "three.arcprize.org")
+PORT = os.environ.get("PORT", 443)
 
 # Hide standard ports in URL
 if (SCHEME == "http" and str(PORT) == "80") or (
@@ -85,7 +95,11 @@ def main() -> None:
     stdout_handler.setLevel(log_level)
     stdout_handler.setFormatter(formatter)
 
-    file_handler = logging.FileHandler("logs.log", mode="w")
+    # NOTE: multiple concurrent runs can corrupt a single shared log file.
+    # Write each run to its own log file.
+    os.makedirs("logs", exist_ok=True)
+    run_id = int(time.time())
+    file_handler = logging.FileHandler(os.path.join("logs", f"run-{run_id}.log"), mode="w")
     file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
 
@@ -114,12 +128,38 @@ def main() -> None:
         help="Comma-separated list of tags for the scorecard (e.g., 'experiment,v1.0')",
         default=None,
     )
+    parser.add_argument(
+        "--no-gui",
+        action="store_true",
+        help="Run PPOAgent headless (no pygame UI). By default PPOAgent opens the UI.",
+    )
 
     args = parser.parse_args()
 
     if not args.agent:
         logger.error("An Agent must be specified")
         return
+
+    # Apply PPO config file (if present) after dotenv but before agent construction.
+    # This lets you keep all knobs in one file (`ppo_config.toml`) instead of many env vars.
+    applied_cfg = apply_ppo_config_if_present(override_env=False)
+    if applied_cfg:
+        logger.info("Applied ppo_config.toml: %s", applied_cfg)
+
+    # PPO UI/headless handling:
+    # Many users set PPO_NO_GUI/PPO_RANDOM_GOAL for headless tests and forget to unset it.
+    # We default to UI when running ppoagent unless --no-gui is explicitly passed.
+    if args.agent == "ppoagent":
+        if getattr(args, "no_gui", False):
+            os.environ["PPO_NO_GUI"] = "1"
+            logger.info("PPOAgent will run headless (--no-gui).")
+        else:
+            if "PPO_NO_GUI" in os.environ:
+                os.environ.pop("PPO_NO_GUI", None)
+            # Also clear headless-only goal envs so UI runs rely on clicking the goal.
+            os.environ.pop("PPO_RANDOM_GOAL", None)
+            os.environ.pop("PPO_FIXED_GOAL", None)
+            logger.info("PPOAgent will run with UI (default).")
 
     print(f"{ROOT_URL}/api/games")
     print(f"Using API Key: {HEADERS['X-API-Key'][:8]}...{HEADERS['X-API-Key'][-4:]}")

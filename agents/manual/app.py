@@ -94,6 +94,14 @@ class ManualGame:
             self.state.cursor_pos = target
             if self.state.visual_cursor_pos is None:
                 self.state.visual_cursor_pos = list(target)
+        
+        # Goal sync (optional; normally set by clicking in UI)
+        if "goal" in data:
+            g = data["goal"]
+            if g is None:
+                self.state.spatial_goal_pos = None
+            elif isinstance(g, dict) and "x" in g and "y" in g:
+                self.state.spatial_goal_pos = (int(g["x"]), int(g["y"]))
 
         if "attention" in data:
             self.state.current_attention_map = data["attention"]
@@ -111,11 +119,23 @@ class ManualGame:
 
         if "metrics" in data:
             m = data["metrics"]
-            for k in ["reward", "dopamine", "confidence", "manual_dopamine", "pain", "trigger"]:
-                key_map = {"reward": "reward_mean", "confidence": "plan_confidence"}
-                val_key = key_map.get(k, k)
-                if val_key in m:
-                    self.state.metrics_history[k].append(m[val_key])
+            # Accept both new and legacy metric keys.
+            # PPO now reports: reward, manual_dopamine, manual_pain, trigger, goal_dist, goal_progress
+            # Visualizer may also send legacy aliases like reward_mean.
+            def _append(series_key: str, *candidate_keys: str) -> None:
+                for ck in candidate_keys:
+                    if ck in m and m[ck] is not None:
+                        self.state.metrics_history[series_key].append(float(m[ck]))
+                        return
+
+            _append("reward", "reward", "reward_mean")
+            _append("manual_dopamine", "manual_dopamine", "dopamine")
+            _append("manual_pain", "manual_pain", "pain")
+            _append("trigger", "trigger")
+            _append("cursor_speed", "cursor_speed")
+            _append("action_energy", "action_energy")
+            _append("goal_dist", "goal_dist")
+            _append("goal_progress", "goal_progress")
             if "current_thought" in m:
                 self.state.current_thought = m["current_thought"]
             
@@ -264,8 +284,7 @@ class ManualGame:
 
             # KeyDown events for shortcuts
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_b:
-                    self.network.send_action("BREED_MOTIVATION")
+                pass
 
 
     def _handle_game_select_events(self, events):

@@ -6,7 +6,9 @@ from typing import Dict, Any, Optional
 
 class NetworkHandler:
     def __init__(self):
-        self.input_queue = queue.Queue()
+        # Keep only the latest message so the UI never lags behind trying to process a backlog.
+        # This also prevents pipe backpressure from slowing down the training process.
+        self.input_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=1)
         self.running = True
         self._start_reader()
 
@@ -20,7 +22,18 @@ class NetworkHandler:
                 line = sys.stdin.readline()
                 if not line:
                     break
-                self.input_queue.put(line)
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                # Coalesce: replace queued message with the newest
+                try:
+                    if self.input_queue.full():
+                        _ = self.input_queue.get_nowait()
+                    self.input_queue.put_nowait(data)
+                except queue.Full:
+                    pass
             except ValueError:
                 break
 
@@ -34,14 +47,10 @@ class NetworkHandler:
             pass # Handle broken pipe or closed stdout
 
     def get_messages(self) -> list:
-        messages = []
+        # Drain and return the latest message (at most 1 due to queue maxsize=1)
+        messages: list[Dict[str, Any]] = []
         while not self.input_queue.empty():
-            line = self.input_queue.get()
-            try:
-                data = json.loads(line)
-                messages.append(data)
-            except json.JSONDecodeError:
-                pass
+            messages.append(self.input_queue.get())
         return messages
 
     def stop(self):

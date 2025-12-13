@@ -39,11 +39,13 @@ class GameState:
     # Metrics
     metrics_history: Dict[str, List[float]] = field(default_factory=lambda: {
         "reward": [],
-        "dopamine": [],
-        "confidence": [],
         "manual_dopamine": [],
-        "pain": [],
-        "trigger": []
+        "manual_pain": [],
+        "trigger": [],
+        "cursor_speed": [],
+        "action_energy": [],
+        "goal_dist": [],
+        "goal_progress": [],
     })
     
     # Controls
