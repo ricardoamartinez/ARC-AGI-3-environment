@@ -361,8 +361,13 @@ def run_sac_training(agent: "PPOAgent") -> None:
                     rb.size,
                 )
 
-            if agent.training_speed > 0:
-                time.sleep(agent.training_speed * 0.1)
+            # Speed slider: 1.0 = fastest (no sleep), 0.0 = slowest (1 sec sleep)
+            # self.training_speed is now updated by agent.py to be 0..1 from UI
+            # We want 0.0 -> 1.0s sleep, 1.0 -> 0.0s sleep.
+            # Linear mapping: sleep = 1.0 - speed
+            if agent.training_speed < 1.0:
+                sleep_time = (1.0 - agent.training_speed)  # Up to 1.0s sleep
+                time.sleep(sleep_time)
 
     except KeyboardInterrupt:
         logger.info("Training interrupted")

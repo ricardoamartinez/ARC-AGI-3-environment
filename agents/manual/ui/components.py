@@ -105,10 +105,10 @@ class Graph:
             if curr_max <= curr_min: curr_max = curr_min + 1e-6
             
             points = []
-            max_history = 200 # Assumed from constants, passed in or global
-            
+            num_points = len(vals)
+
             for j, v in enumerate(vals):
-                px = self.rect.x + (j / (max_history - 1)) * self.rect.width
+                px = self.rect.x + (j / max(1, num_points - 1)) * self.rect.width
                 norm_v = (v - curr_min) / (curr_max - curr_min)
                 norm_v = max(0.0, min(1.0, norm_v))
                 py = (self.rect.y + self.rect.height) - (norm_v * self.rect.height)

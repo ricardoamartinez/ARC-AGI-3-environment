@@ -378,16 +378,42 @@ class GameRenderer:
         
         for k_sym, k_label, kx, ky, kw, kh in keys:
             last_act = state.key_activations.get(k_sym, 0)
-            time_diff = pygame.time.get_ticks() - last_act
+            was_penalized = state.key_penalized.get(k_sym, False)
+            now = pygame.time.get_ticks()
+            time_diff = now - last_act
             
+            # Flash on the exact frame of activation (or very recently)
+            # White/Green = action had effect, Red = action was penalized (no effect)
             brightness = 50
-            if time_diff < KEY_FADE_DURATION:
+            is_active = False
+            
+            if time_diff < 50: # Instant flash duration (50ms)
+                brightness = 255
+                is_active = True
+            elif time_diff < KEY_FADE_DURATION:
                 ratio = 1.0 - (time_diff / KEY_FADE_DURATION)
-                brightness = int(50 + ratio * 205)
+                brightness = int(50 + ratio * 200) # Fade out
             
             rect = pygame.Rect(kb_base_x + kx, kb_base_y + ky, kw, kh)
-            pygame.draw.rect(self.screen, (brightness, brightness, brightness), rect, border_radius=5)
-            pygame.draw.rect(self.screen, (100, 100, 100), rect, 2, border_radius=5)
+            
+            # Draw key background - RED if penalized, WHITE/GRAY otherwise
+            if is_active or time_diff < KEY_FADE_DURATION:
+                if was_penalized:
+                    # Red tint for penalized actions (no effect)
+                    bg_color = (brightness, int(brightness * 0.3), int(brightness * 0.3))
+                else:
+                    # Normal white/gray for effective actions
+                    bg_color = (brightness, brightness, brightness)
+            else:
+                bg_color = (brightness, brightness, brightness)
+            pygame.draw.rect(self.screen, bg_color, rect, border_radius=5)
+            
+            # Draw border (green if effective, red if penalized, gray if inactive)
+            if is_active:
+                border_col = (255, 50, 50) if was_penalized else (0, 255, 0)
+            else:
+                border_col = (100, 100, 100)
+            pygame.draw.rect(self.screen, border_col, rect, 2, border_radius=5)
             
             if k_label:
                 text_col = (0, 0, 0) if brightness > 150 else (255, 255, 255)

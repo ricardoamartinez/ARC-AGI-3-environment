@@ -136,8 +136,13 @@ class Agent(ABC):
         if hasattr(self, "recorder") and not self.is_playback:
             self.recorder.record(json.loads(frame.model_dump_json()))
 
-    def do_action_request(self, action: GameAction) -> Response:
-        data = action.action_data.model_dump()
+    def do_action_request(self, action: GameAction, action_data: Optional[dict] = None) -> Response:
+        # Use provided action_data if given, otherwise fall back to enum's mutable state
+        # (NOTE: The mutable state on GameAction enums is a race condition - always prefer passing data explicitly)
+        if action_data is not None:
+            data = dict(action_data)
+        else:
+            data = action.action_data.model_dump()
         # Some API endpoints require card_id for all actions (not only RESET) to ensure
         # commands are routed to the correct scorecard session / game instance.
         if self.card_id:
@@ -159,9 +164,15 @@ class Agent(ABC):
             logger.warning(f"Exception during action request: {r.json()}")
         return r
 
-    def take_action(self, action: GameAction) -> Optional[FrameData]:
-        """Submits the specific action and gets the next frame."""
-        frame_data = self.do_action_request(action).json()
+    def take_action(self, action: GameAction, action_data: Optional[dict] = None) -> Optional[FrameData]:
+        """Submits the specific action and gets the next frame.
+        
+        Args:
+            action: The GameAction enum type to execute
+            action_data: Optional dict of action parameters. If provided, this is used
+                        instead of the mutable action.action_data to avoid race conditions.
+        """
+        frame_data = self.do_action_request(action, action_data).json()
         
         # Check for API errors explicitly before validation
         if "error" in frame_data:

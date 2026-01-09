@@ -66,6 +66,12 @@ class ARCGymEnv(gym.Env):
         # - "dense":   -dist^2*reward_scale - action_penalty - vel_penalty - jerk_penalty (+arrival_bonus on entry)
         self.reward_mode = os.environ.get("PPO_REWARD_MODE", "dense").strip().lower()
 
+        # Sparse reward mode (game solving): ignore all shaping and only reward on WIN.
+        # This is intentionally off by default; cursor-to-goal trainers rely on dense shaping.
+        self.sparse_reward_enabled = os.environ.get("PPO_SPARSE_REWARD", "0") == "1"
+        self.success_bonus = float(os.environ.get("PPO_SUCCESS_BONUS", "1.0"))
+        self.success_bonus = max(0.0, self.success_bonus)
+
         self.reward_scale = float(os.environ.get("PPO_REWARD_SCALE", "2.0"))
         self.reward_scale = max(0.0, self.reward_scale)
         self.action_l2_penalty = float(os.environ.get("PPO_ACTION_L2_PENALTY", "0.001"))
@@ -106,13 +112,15 @@ class ARCGymEnv(gym.Env):
 
         # If false, we never send API game actions; we only learn cursor navigation + goal reaching.
         # This avoids resets and prevents GAME_NOT_STARTED / GAME_OVER issues from crashing training.
-        self.allow_game_actions = os.environ.get("PPO_ALLOW_GAME_ACTIONS", "0") == "1"
+        # Default ON so actions actually execute in-game.
+        self.allow_game_actions = os.environ.get("PPO_ALLOW_GAME_ACTIONS", "1") == "1"
         # Bootstrapping: server may require RESET once to get the first frame. Disable only if you
         # guarantee frames already exist (otherwise training can't start).
         self.disable_reset_bootstrap = os.environ.get("PPO_DISABLE_RESET_BOOTSTRAP", "0") == "1"
 
         # Target command smoothing (reduces jitter from action noise / exploration).
-        self.target_ema_alpha = float(os.environ.get("PPO_TARGET_EMA_ALPHA", "0.25"))
+        # Higher alpha = more responsive to new targets (less smoothing)
+        self.target_ema_alpha = float(os.environ.get("PPO_TARGET_EMA_ALPHA", "0.6"))
         self.target_ema_alpha = max(0.0, min(1.0, self.target_ema_alpha))
         self._ema_tx: float | None = None
         self._ema_ty: float | None = None
@@ -128,12 +136,16 @@ class ARCGymEnv(gym.Env):
         else:
             # Default: RTAC (and other non-SAC trainers) use relative targets.
             self.target_pos_relative = trainer != "sac"
-        self.target_delta_max = float(os.environ.get("PPO_TARGET_DELTA_MAX", "8.0"))
+        self.target_delta_max = float(os.environ.get("PPO_TARGET_DELTA_MAX", "16.0"))  # Increased for faster cursor
         self.target_delta_max = max(0.0, min(float(self.grid_size - 1), self.target_delta_max))
 
         # Mild penalty for hitting walls (helps prevent edge/corner stickiness).
         self.wall_penalty = float(os.environ.get("PPO_WALL_PENALTY", "0.02"))
         self.wall_penalty = max(0.0, self.wall_penalty)
+        
+        # Penalty for game actions that have no effect (encourages learning valid actions)
+        self.ineffective_action_penalty = float(os.environ.get("PPO_INEFFECTIVE_ACTION_PENALTY", "0.5"))
+        self.ineffective_action_penalty = max(0.0, self.ineffective_action_penalty)
         
         # Components (delta-mode only)
         self.physics = PhysicsEngine(self.grid_size)
@@ -144,8 +156,12 @@ class ARCGymEnv(gym.Env):
         
         self.observation_space = self.obs_builder.observation_space
         if self.action_mode in ("vel", "velocity", "cursor_vel"):
-            # 2D continuous velocity command in [-1,1] (CursorGoalEnv-style).
-            self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+            # Hybrid action space: 3D continuous (ax, ay, trigger) + discrete action index.
+            # This allows both velocity control AND discrete game actions (UP/DOWN/LEFT/RIGHT/SPACE/CLICK/ENTER).
+            self.action_space = spaces.Tuple((
+                spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+                spaces.Discrete(10)
+            ))
         elif self.action_mode == "target_cell":
             self.action_space = spaces.MultiDiscrete([self.grid_size, self.grid_size])
         elif self.action_mode == "target_pos":
@@ -164,6 +180,8 @@ class ARCGymEnv(gym.Env):
         
         self.current_step = 0
         self.last_grid = None
+        self.last_score = 0
+        self.last_state = GameState.NOT_PLAYED
         
         if self.action_mode != "target_cell":
             self.physics.reset()
@@ -222,6 +240,8 @@ class ARCGymEnv(gym.Env):
             self.agent.cursor_x = w / 2.0
             self.agent.cursor_y = h / 2.0
             self.last_grid = grid
+            self.last_score = int(getattr(frame, "score", 0))
+            self.last_state = frame.state
         
         current_grid = self.last_grid if self.last_grid is not None else np.zeros((self.grid_size, self.grid_size), dtype=np.uint8)
         # Keep a copy for the UI in case server frames stop flowing.
@@ -245,15 +265,34 @@ class ARCGymEnv(gym.Env):
         action_ay = 0.0
 
         if self.action_mode in ("vel", "velocity", "cursor_vel"):
-            # CursorGoalEnv-style dynamics in world coordinates.
-            if isinstance(action, np.ndarray):
-                ax = float(action[0]) if action.shape[0] >= 2 else 0.0
-                ay = float(action[1]) if action.shape[0] >= 2 else 0.0
+            # Hybrid action: (continuous[3], discrete) -> velocity control + discrete game actions
+            # Unpack action tuple
+            if isinstance(action, tuple) and len(action) == 2:
+                cont_actions, disc_idx = action
             else:
-                ax = float(action[0])
-                ay = float(action[1])
+                # Fallback: pure continuous (legacy compatibility)
+                cont_actions = action if isinstance(action, np.ndarray) else np.array(action, dtype=np.float32)
+                disc_idx = 0
+            
+            if isinstance(cont_actions, np.ndarray):
+                ax = float(cont_actions[0]) if cont_actions.shape[0] >= 1 else 0.0
+                ay = float(cont_actions[1]) if cont_actions.shape[0] >= 2 else 0.0
+                trigger = float(cont_actions[2]) if cont_actions.shape[0] >= 3 else -1.0
+            else:
+                ax = float(cont_actions[0]) if len(cont_actions) >= 1 else 0.0
+                ay = float(cont_actions[1]) if len(cont_actions) >= 2 else 0.0
+                trigger = float(cont_actions[2]) if len(cont_actions) >= 3 else -1.0
+            
             a = np.array([float(np.clip(ax, -1.0, 1.0)), float(np.clip(ay, -1.0, 1.0))], dtype=np.float32)
             action_ax, action_ay = float(a[0]), float(a[1])
+            
+            # Process discrete action if trigger exceeds threshold
+            curr_speed = float(np.linalg.norm(self._w_vel))
+            final_action_idx, _, _, trigger = self.action_processor.process(
+                np.array([action_ax, action_ay, trigger], dtype=np.float32),
+                int(disc_idx),
+                curr_speed
+            )
 
             require_goal = os.environ.get("PPO_REQUIRE_GOAL", "1") == "1"
             if goal is None and require_goal:
@@ -518,36 +557,80 @@ class ARCGymEnv(gym.Env):
 
         cx_int = int(round(self.agent.cursor_x))
         cy_int = int(round(self.agent.cursor_y))
-        # In cursor-only mode, never attempt API game actions.
+        
         game_action = None
+        action_data = None
         if self.allow_game_actions and self.action_mode != "target_cell":
-            game_action = self.action_processor.get_game_action(final_action_idx, cx_int, cy_int, self.agent.game_id)
+            result = self.action_processor.get_game_action(final_action_idx, cx_int, cy_int, self.agent.game_id)
+            if result is not None:
+                game_action, action_data = result
         
         frame = None
+        action_had_effect = False
         if game_action:
-            frame = self.agent.take_action(game_action)
+            # Check if game needs reset (GAME_OVER state)
+            if self.last_state == GameState.GAME_OVER:
+                logger.info("Game is GAME_OVER, attempting auto-reset...")
+                reset_frame = self.agent.take_action(GameAction.RESET, {"game_id": self.agent.game_id})
+                if reset_frame:
+                    self.agent.append_frame(reset_frame)
+                    self.last_state = reset_frame.state
+                    logger.info("Auto-reset successful, state=%s", reset_frame.state)
+            
+            # Capture grid state BEFORE the action to detect if it actually changed anything
+            grid_before = None
+            score_before = self.last_score
+            if self.last_grid is not None:
+                grid_before = self.last_grid.copy()
+            
+            # Pass action_data explicitly to avoid race conditions with mutable enum state
+            frame = self.agent.take_action(game_action, action_data)
             if frame:
                 self.agent.append_frame(frame)
                 
-                action_name = game_action.name
+                # Check if the action actually changed the game state
+                grid_after = np.array(frame.frame[0], dtype=np.uint8) if (frame.frame and frame.frame[0]) else None
+                score_after = int(getattr(frame, "score", 0))
                 
+                # Detect if action had any effect: grid changed OR score changed OR game state changed
+                if grid_before is not None and grid_after is not None:
+                    if not np.array_equal(grid_before, grid_after):
+                        action_had_effect = True
+                if score_after != score_before:
+                    action_had_effect = True
+                if frame.state != self.last_state:
+                    action_had_effect = True
+                
+                # ALWAYS show raw model output - what action it chose
+                action_name = game_action.name
                 if final_action_idx == 4: action_name = "UP ↑"
                 elif final_action_idx == 5: action_name = "DOWN ↓"
                 elif final_action_idx == 6: action_name = "LEFT ←"
                 elif final_action_idx == 7: action_name = "RIGHT →"
                 elif final_action_idx == 8: action_name = "SPACE ␣"
                 elif final_action_idx == 9: action_name = "ENTER ↵"
+                elif final_action_idx <= 3: action_name = "CLICK"
                 
                 self.agent._last_action_viz = {
                     "id": game_action.value,
                     "name": action_name,
-                    "data": game_action.action_data.model_dump()
+                    "data": {"x": cx_int, "y": cy_int, "ax": action_ax, "ay": action_ay},
+                    "had_effect": action_had_effect
                 }
+                
+                if action_had_effect:
+                    logger.debug("Game action HAD EFFECT: %s (id=%s)", action_name, game_action.value)
+                else:
+                    logger.debug("Game action NO EFFECT: %s (id=%s)", action_name, game_action.value)
             else:
-                # No RESET policy: if the API refuses actions (e.g., GAME_NOT_STARTED after GAME_OVER),
-                # keep training in cursor-only mode using the last valid frame.
-                logger.warning("Game action failed; falling back to last frame (cursor-only mode).")
-                frame = self.agent.frames[-1] if self.agent.frames else None
+                # API refused action - try reset if game might be over
+                logger.warning("Game action FAILED: %s", game_action.name)
+                reset_frame = self.agent.take_action(GameAction.RESET, {"game_id": self.agent.game_id})
+                if reset_frame:
+                    self.agent.append_frame(reset_frame)
+                    frame = reset_frame
+                else:
+                    frame = self.agent.frames[-1] if self.agent.frames else None
         else:
             if self.agent.frames:
                  frame = self.agent.frames[-1]
@@ -558,9 +641,15 @@ class ARCGymEnv(gym.Env):
                 status = "Cursor Move"
                 if trigger > 0.2:
                     status = f"Aiming..."
+                # Include ax/ay for keyboard direction highlighting
                 self.agent._last_action_viz = {
                     "name": status,
-                    "data": {"x": self.agent.cursor_x, "y": self.agent.cursor_y}
+                    "data": {
+                        "x": self.agent.cursor_x, 
+                        "y": self.agent.cursor_y,
+                        "ax": action_ax,
+                        "ay": action_ay,
+                    }
                 }
         
         if not frame:
@@ -568,6 +657,13 @@ class ARCGymEnv(gym.Env):
                 frame = self.agent.frames[-1]
             else:
                 raise RuntimeError("No frame returned and no previous frames available.")
+
+        # Ineffective action penalty: penalize game actions that don't change the game state
+        # This teaches the model to only press buttons when they will have an effect
+        ineffective_penalty_applied = 0.0
+        if game_action is not None and not action_had_effect:
+            ineffective_penalty_applied = float(self.ineffective_action_penalty)
+            reward -= ineffective_penalty_applied
 
         current_grid = np.array(frame.frame[0], dtype=np.uint8) if (frame.frame and frame.frame[0]) else None
         if current_grid is None:
@@ -590,6 +686,7 @@ class ARCGymEnv(gym.Env):
             "score": frame.score,
             "reward": reward,
             "trigger": float(trigger),
+            "final_action_idx": int(final_action_idx),
             "manual_dopamine": manual_dopamine,
             "manual_pain": manual_pain,
             "goal": {"x": goal[0], "y": goal[1]} if goal is not None else None,
@@ -611,7 +708,28 @@ class ARCGymEnv(gym.Env):
             "hit_wall": bool(hit_wall),
             "action_energy": action_energy,
             "energy_penalty_coef": float(self.energy_penalty_coef) if self.energy_penalty_enabled else 0.0,
+            "action_had_effect": action_had_effect,
+            "ineffective_action_penalty": ineffective_penalty_applied,
         }
+
+        # Game terminal signals (used by sparse reward training / world-model training).
+        # Note: this env is configured as a continuing task by default (terminated/truncated stay False),
+        # but we still expose game outcome in info for downstream trainers.
+        win = bool(frame.state == GameState.WIN)
+        game_over = bool(frame.state == GameState.GAME_OVER)
+        metrics["game_state"] = str(frame.state)
+        metrics["game_success"] = win
+        metrics["game_over"] = game_over
+        metrics["score_delta"] = int(frame.score) - int(self.last_score)
+
+        # Optional sparse reward override: only reward on WIN.
+        if bool(getattr(self, "sparse_reward_enabled", False)):
+            reward = float(self.success_bonus) if win else 0.0
+            metrics["reward"] = reward
+
+        # Update last_* for delta calculations next step.
+        self.last_score = int(frame.score)
+        self.last_state = frame.state
         
         obs = self._get_obs(current_grid, prev_grid)
         return obs, reward, terminated, truncated, metrics

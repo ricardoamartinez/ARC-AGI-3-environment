@@ -7,8 +7,23 @@ from typing import Any, Dict, Optional
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
-    # Python 3.11+ built-in TOML parser.
-    import tomllib
+    # Python 3.11+ built-in TOML parser: tomllib.
+    # For older Python versions, we *optionally* fall back to tomli if installed.
+    # If neither is available, we skip config loading (and rely on env vars).
+    try:
+        import tomllib  # type: ignore
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib  # type: ignore
+        except ModuleNotFoundError:
+            # Keep startup robust even if user runs with older Python.
+            # main.py calls this before logging is configured, so use print.
+            print(
+                "[PPOConfig] WARNING: TOML parser not available (need Python 3.11+ 'tomllib' or 'tomli'). "
+                f"Skipping config file: {path}",
+                flush=True,
+            )
+            return {}
 
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -64,6 +79,7 @@ def apply_ppo_config(
         "trainer.name": "PPO_TRAINER",
         "trainer.action_mode": "PPO_ACTION_MODE",
         "trainer.require_goal": "PPO_REQUIRE_GOAL",
+        "trainer.allow_game_actions": "PPO_ALLOW_GAME_ACTIONS",
 
         # Feature mode (shared by RTAC/SAC)
         "features.mode": "PPO_FEATURES",
@@ -83,6 +99,7 @@ def apply_ppo_config(
         "physics.bounds": "PPO_BOUNDS",
         "physics.max_speed": "PPO_MAX_SPEED",
         "physics.inertia_alpha": "PPO_INERTIA_ALPHA",
+        "physics.bounds": "PPO_BOUNDS",
         "physics.vel_response": "PPO_VEL_RESPONSE",
         "physics.damping": "PPO_DAMPING",
         "physics.pd_kp": "PPO_PD_KP",
@@ -91,6 +108,7 @@ def apply_ppo_config(
         "physics.stop_speed": "PPO_STOP_SPEED",
         "physics.speed_scale_max": "PPO_SPEED_SCALE_MAX",
         "physics.target_ema_alpha": "PPO_TARGET_EMA_ALPHA",
+        "physics.target_delta_max": "PPO_TARGET_DELTA_MAX",
 
         # SAC hyperparams
         "sac.lr": "PPO_SAC_LR",
@@ -133,6 +151,45 @@ def apply_ppo_config(
         "logging.log_every": "PPO_LOG_EVERY",
         "logging.ui_fps": "PPO_UI_FPS",
         "logging.ui_grid_fps": "PPO_UI_GRID_FPS",
+        "logging.ui_bayes_maps": "PPO_UI_BAYES_MAPS",
+
+        # Intrinsic motivation (exploration in sparse reward settings)
+        "intrinsic.enabled": "PPO_INTRINSIC_ENABLED",
+        "intrinsic.use_rnd": "PPO_USE_RND",
+        "intrinsic.use_counts": "PPO_USE_COUNTS",
+        "intrinsic.rnd_scale": "PPO_RND_SCALE",
+        "intrinsic.count_scale": "PPO_COUNT_SCALE",
+        "intrinsic.rnd_lr": "PPO_RND_LR",
+
+        # Sparse reward mode (only extrinsic reward on game success)
+        "reward.sparse_mode": "PPO_SPARSE_REWARD",
+        "reward.success_bonus": "PPO_SUCCESS_BONUS",
+
+        # World Model (V-JEPA style)
+        "world_model.latent_dim": "WM_LATENT_DIM",
+        "world_model.planning_horizon": "WM_PLANNING_HORIZON",
+        "world_model.use_planner": "WM_USE_PLANNER",
+        "world_model.use_curiosity": "WM_USE_CURIOSITY",
+        "world_model.curiosity_scale": "WM_CURIOSITY_SCALE",
+        "world_model.train_every": "WM_TRAIN_EVERY",
+        "world_model.exploration_steps": "WM_EXPLORATION_STEPS",
+        "world_model.buffer_size": "WM_BUFFER_SIZE",
+        "world_model.batch_size": "WM_BATCH_SIZE",
+        "world_model.lr": "WM_LR",
+        # V-JEPA-style masked denoising + stage-wise freezing
+        "world_model.mask_ratio": "WM_MASK_RATIO",
+        "world_model.mask_coef": "WM_MASK_COEF",
+        "world_model.freeze_encoder_after": "WM_FREEZE_ENCODER_AFTER",
+        # Optional anti-collapse regularization
+        "world_model.variance_coef": "WM_VAR_COEF",
+        "world_model.variance_target": "WM_VAR_TARGET",
+        # Hybrid-action exploration helpers (delta-mode)
+        "world_model.trigger_prob": "WM_TRIGGER_PROB",
+        # Cursor instrumentation for click-dependent dynamics
+        "world_model.mark_cursor": "WM_MARK_CURSOR",
+        "world_model.cursor_token": "WM_CURSOR_TOKEN",
+        "world_model.mark_prev_cursor": "WM_MARK_PREV_CURSOR",
+        "world_model.prev_cursor_token": "WM_PREV_CURSOR_TOKEN",
     }
 
     applied: dict[str, str] = {}

@@ -19,8 +19,9 @@ class ActionProcessor:
 
     def __init__(self):
         # Minimal mapping: trigger > threshold enables the discrete action index
-        # Default high so the policy doesn't randomly click/press keys while learning cursor navigation.
-        self.act_threshold = float(os.environ.get("PPO_TRIGGER_THRESHOLD", "0.9"))
+        # Default 0.5 so there's a 50% chance of action firing when trigger is random.
+        # The policy learns to increase/decrease trigger based on rewards.
+        self.act_threshold = float(os.environ.get("PPO_TRIGGER_THRESHOLD", "0.5"))
 
     def reset(self):
         pass
@@ -41,28 +42,32 @@ class ActionProcessor:
 
     def get_game_action(
         self, final_action_idx: int, cursor_x: int, cursor_y: int, game_id: str
-    ) -> Optional[GameAction]:
+    ) -> Optional[Tuple[GameAction, dict]]:
+        """
+        Returns a tuple of (GameAction, action_data) to avoid race conditions
+        with the mutable state on GameAction enum members.
+        
+        Returns None if no action should be taken.
+        """
         if final_action_idx == -1:
             return None
 
         click_action = final_action_idx <= 3
 
         if click_action:
-            game_action = GameAction.ACTION6
-            game_action.set_data({"x": cursor_x, "y": cursor_y, "game_id": game_id})
-            return game_action
+            return (GameAction.ACTION6, {"x": cursor_x, "y": cursor_y, "game_id": game_id})
         elif final_action_idx == 4:
-            return GameAction.ACTION1  # UP
+            return (GameAction.ACTION1, {"game_id": game_id})  # UP
         elif final_action_idx == 5:
-            return GameAction.ACTION2  # DOWN
+            return (GameAction.ACTION2, {"game_id": game_id})  # DOWN
         elif final_action_idx == 6:
-            return GameAction.ACTION3  # LEFT
+            return (GameAction.ACTION3, {"game_id": game_id})  # LEFT
         elif final_action_idx == 7:
-            return GameAction.ACTION4  # RIGHT
+            return (GameAction.ACTION4, {"game_id": game_id})  # RIGHT
         elif final_action_idx == 8:
-            return GameAction.ACTION5  # SPACE
+            return (GameAction.ACTION5, {"game_id": game_id})  # SPACE
         elif final_action_idx == 9:
-            return GameAction.ACTION7  # ENTER
+            return (GameAction.ACTION7, {"game_id": game_id})  # ENTER
 
         return None
 

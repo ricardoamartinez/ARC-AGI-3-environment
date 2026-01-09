@@ -139,6 +139,13 @@ class Swarm:
                 f"API error during open scorecard: {r.status_code} - {response_data}"
             )
 
+        # Some API responses may be HTTP 200 but still include an error payload.
+        if "error" in response_data:
+            logger.warning(f"API error during open scorecard: {response_data}")
+
+        if "card_id" not in response_data:
+            raise Exception(f"Open scorecard response missing card_id: {response_data}")
+
         return str(response_data["card_id"])
 
     def close_scorecard(self, card_id: str) -> Optional[Scorecard]:
@@ -160,6 +167,11 @@ class Swarm:
             logger.warning(
                 f"API error during close scorecard: {r.status_code} - {response_data}"
             )
+            return None
+
+        # Some API responses may be HTTP 200 but still include an error payload.
+        if "error" in response_data:
+            logger.warning(f"API error during close scorecard: {response_data}")
             return None
 
         return Scorecard.model_validate(response_data)

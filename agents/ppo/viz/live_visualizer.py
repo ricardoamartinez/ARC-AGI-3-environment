@@ -53,13 +53,14 @@ class LiveVisualizerCallback:
             logger.info("Quit signal detected in callback, stopping training...")
             return False
 
-        # Throttle UI updates to a fixed FPS; never sleep (sleeping here causes lag).
+        # Fast path: check throttle FIRST before any other work
         now = time.time()
         min_dt = 1.0 / self._ui_fps
         if now - self._last_send_ts < min_dt:
-            return True
+            return True  # Skip this step - nothing else to do
         self._last_send_ts = now
 
+        # Only do work if we're actually going to send an update
         latest_frame = self.agent.frames[-1] if self.agent.frames else None
         grids = None
         score = 0

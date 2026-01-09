@@ -4,7 +4,8 @@
 [trainer]
 name = "rtac"                # online TD actor-critic update every step
 action_mode = "vel"
-require_goal = true
+require_goal = false
+random_goal = true
 
 [features]
 mode = "somatic"             # ultra-light; uses explicit cursor/goal coords
@@ -15,6 +16,7 @@ disable_lstm = true          # feedforward (cheapest), reduces UI lag
 log_every = 50
 ui_fps = 60
 ui_grid_fps = 5
+ui_bayes_maps = false  # Disable slow Bayes heatmaps (saves ~3.7s per step!)
 
 [reward]
 # Dense continuing reward (no terminals). This is what the new RTAC trainer learns from.
@@ -30,20 +32,21 @@ jerk_l2_penalty = 0.005
 wall_penalty = 0.02
 
 [physics]
-# PD controller + damping + "stickiness" to stop jitter at the goal.
-# CursorGoalEnv-style world dynamics (reference):
+# MAXIMUM SPEED cursor movement
 bounds = 1.0
-max_speed = 0.06
+max_speed = 32.0              # MAXIMUM - cursor can move 32 cells/step
 vel_response = 1.0
+inertia_alpha = 1.0           # INSTANT response - no smoothing
 
-# (The following physics params are used by other action modes; vel-mode ignores them.)
-damping = 0.05
-pd_kp = 0.35
-pd_kd = 0.25
-stop_radius = 0.75
-stop_speed = 0.05
-speed_scale_max = 3.0
-target_ema_alpha = 0.25
+# Physics params - INSTANT movement:
+damping = 0.0                 # NO friction
+pd_kp = 1.0                   # MAXIMUM acceleration
+pd_kd = 0.0                   # NO damping - pure spring
+stop_radius = 0.1             # almost no stickiness
+stop_speed = 0.5              # high threshold
+speed_scale_max = 10.0        # MAXIMUM speed scaling
+target_ema_alpha = 1.0        # INSTANT target tracking - no smoothing
+target_delta_max = 48.0       # can jump almost entire grid
 
 [sac]
 lr = 1e-3
@@ -77,5 +80,15 @@ infer_device = "cpu"         # inference-only model for UI loop
 sync_every_updates = 25      # tradeoff: lower = faster visible adaptation, higher = less overhead
 queue_size = 512
 torch_num_threads = 1
-
-
+[world_model]
+# V-JEPA 2 style world model - MAXIMUM SPEED
+latent_dim = 64              # MINIMUM for speed
+planning_horizon = 3         # SHORT planning
+use_planner = true           # Enable CEM planning
+use_curiosity = true         # Enable curiosity
+curiosity_scale = 0.1        # Scale of curiosity reward
+train_every = 64             # Train RARELY = maximum inference speed
+exploration_steps = 200      # Start planning FAST
+buffer_size = 5000           # Small buffer
+batch_size = 16              # TINY batch = fastest training
+lr = 1e-3                    # HIGH LR to compensate

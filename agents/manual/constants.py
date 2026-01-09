@@ -81,6 +81,9 @@ HEATMAP_COLORS = {
     "pain": (255, 0, 0),          # Pure Red
     "visit": (0, 255, 255),       # Cyan
     "value": (0, 255, 0),         # Green
+    "controllability": (0, 255, 120),  # Green-ish
+    "surprise": (255, 180, 0),         # Orange
+    "disagreement": (255, 0, 255),     # Magenta
     "obs_delta": (255, 255, 0),   # Yellow
     "obs_focus": (255, 0, 255),   # Magenta
     "obs_goal": (0, 100, 255),    # Blue
@@ -90,7 +93,8 @@ HEATMAP_COLORS = {
 }
 
 HEATMAP_MODES = [
-    "attention", "pain", "visit", "value", 
+    "attention", "pain", "visit", "value",
+    "controllability", "surprise", "disagreement",
     "obs_delta", "obs_focus", "obs_goal", 
     "obs_vel_x", "obs_vel_y", "obs_pain"
 ]

@@ -39,17 +39,19 @@ class GameState:
     # Metrics
     metrics_history: Dict[str, List[float]] = field(default_factory=lambda: {
         "reward": [],
+        "dopamine": [],
+        "confidence": [],
         "manual_dopamine": [],
         "manual_pain": [],
         "trigger": [],
         "cursor_speed": [],
         "action_energy": [],
         "goal_dist": [],
-        "goal_progress": [],
+        "goal_progress": []
     })
     
     # Controls
-    speed_val: float = 0.0
+    speed_val: float = 1.0  # 1.0 = fastest, 0.0 = slowest
     manual_dopamine_val: float = 0.0
     manual_pain_val: float = 0.0
     dragging_slider: bool = False
@@ -58,6 +60,7 @@ class GameState:
     
     # Keyboard Visuals
     key_activations: Dict[str, int] = field(default_factory=dict)
+    key_penalized: Dict[str, bool] = field(default_factory=dict)  # Track if last activation was penalized
 
     running: bool = True
 

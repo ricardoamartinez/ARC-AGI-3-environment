@@ -13,7 +13,7 @@ import numpy as np
 from ..agent import Agent
 from ..structs import FrameData, GameAction, GameState
 
-from .training import run_rtac_training, run_sac_training
+from .training import run_rtac_training, run_sac_training, run_world_model_training
 
 logger = logging.getLogger()
 
@@ -167,7 +167,7 @@ class PPOAgent(Agent):
         self.cursor_y = 32
         self._quit_event = threading.Event()
         self._gui_reader_thread = None
-        self.training_speed = 0.0
+        self.training_speed = 1.0  # 1.0 = fastest (no sleep), 0.0 = slowest
         self.manual_dopamine = 0.0
         self.manual_pain = 0.0
         self.spatial_goal: Optional[Tuple[int, int]] = None
@@ -205,6 +205,12 @@ class PPOAgent(Agent):
             self.goal_version += 1
             logger.info(f"Random goal from PPO_RANDOM_GOAL: {self.spatial_goal}")
 
+        # Always start with a default goal so training begins immediately.
+        if self.spatial_goal is None:
+            self.spatial_goal = (32, 32)
+            self.goal_version += 1
+            logger.info(f"Default goal set: {self.spatial_goal}")
+
     def _start_gui(self):
         try:
             print(f"DEBUG: Launching Pygame GUI module agents.manual")
@@ -233,6 +239,18 @@ class PPOAgent(Agent):
                                     break
                                 elif data.get("action") == "SET_SPEED":
                                     speed = float(data.get("value", 0.0))
+                                    # Map slider 0.0-1.0 to a useful delay range.
+                                    # 0.0 -> 1.0s delay (1 step/sec)
+                                    # 1.0 -> 0.0s delay (max speed)
+                                    # Use a non-linear mapping for better control at low speeds?
+                                    # Actually, user requested "1 step per second to max speed".
+                                    # Max speed = 0 delay.
+                                    # Min speed (slider=0) = 1.0s delay.
+                                    # Let's use simple linear interpolation of delay.
+                                    # Delay = (1.0 - speed) * 1.0
+                                    
+                                    # The original logic used self.training_speed in some way?
+                                    # Let's check how training_speed is used.
                                     self.training_speed = max(0.0, min(1.0, speed))
                                 elif data.get("action") == "SET_MANUAL_DOPAMINE":
                                     self.manual_dopamine = min(1.0, float(data.get("value", 0.0)))
@@ -251,6 +269,17 @@ class PPOAgent(Agent):
                                 elif data.get("action") == "TOGGLE_GOAL_SHAPING":
                                     self.goal_shaping_enabled = not self.goal_shaping_enabled
                                     logger.info(f"Goal shaping enabled: {self.goal_shaping_enabled}")
+                                # Handle game actions from user (keyboard input)
+                                elif data.get("action") in ("ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5", "ACTION6", "ACTION7", "RESET"):
+                                    action_name = data.get("action")
+                                    try:
+                                        game_action = GameAction[action_name]
+                                        frame = self.take_action(game_action)
+                                        if frame:
+                                            self.append_frame(frame)
+                                            logger.debug(f"Human action: {action_name}")
+                                    except Exception as e:
+                                        logger.debug(f"Error executing human action {action_name}: {e}")
                                     
                             except json.JSONDecodeError:
                                 pass
@@ -289,6 +318,8 @@ class PPOAgent(Agent):
         trainer = os.environ.get("PPO_TRAINER", "sac").strip().lower()
         if trainer == "rtac":
             run_rtac_training(self)
+        elif trainer in ("world_model", "wm", "jepa"):
+            run_world_model_training(self)
         else:
             # SAC is the default: stable continuous control with replay + target critics
             run_sac_training(self)

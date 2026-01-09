@@ -8,7 +8,6 @@ from agents.structs import (
     GameState,
     Scorecard,
 )
-from agents.templates.langgraph_random_agent import LangGraphRandom
 from agents.templates.random_agent import Random
 
 
@@ -228,6 +227,9 @@ class TestRandomAgent:
 @pytest.mark.unit
 class TestLangGraphRandomAgent:
     def test_agent_init(self):
+        pytest.importorskip("langgraph")
+        from agents.templates.langgraph_random_agent import LangGraphRandom
+
         agent = LangGraphRandom(
             card_id="test-card",
             game_id="test-game",
@@ -250,6 +252,9 @@ class TestLangGraphRandomAgent:
         assert "80" in name
 
     def test_agent_action_logic(self, sample_frame):
+        pytest.importorskip("langgraph")
+        from agents.templates.langgraph_random_agent import LangGraphRandom
+
         agent = LangGraphRandom(
             card_id="test-card",
             game_id="test-game",

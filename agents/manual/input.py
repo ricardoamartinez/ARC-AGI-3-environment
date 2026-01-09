@@ -41,6 +41,7 @@ class InputProcessor:
             pygame.K_RIGHT: "ACTION4",
             pygame.K_SPACE: "ACTION5",
             pygame.K_RETURN: "ACTION7",
+            pygame.K_r: "RESET",
             pygame.K_q: "QUIT"
         }
         
@@ -66,9 +67,6 @@ class InputProcessor:
             self.state.holding_d_key = True
         elif event.key == pygame.K_p:
             self.state.holding_p_key = True
-        elif event.key == pygame.K_g:
-            # Toggle goal shaping (debug helper)
-            self.network.send_action("TOGGLE_GOAL_SHAPING")
 
     def _handle_keyup(self, event):
         if event.key == pygame.K_d:
@@ -89,13 +87,17 @@ class InputProcessor:
             pass
             
         elif event.button == 1: # Left Click
-            # Grid Interaction: set goal flag for training/testing
+            # Grid Interaction
             grid_w = self._get_current_grid_width(scale_factor)
             if x < grid_w:
                 gx = int(x / scale_factor)
                 gy = int(y / scale_factor)
                 self.state.spatial_goal_pos = (gx, gy)
                 self.network.send_action("SET_SPATIAL_GOAL", x=gx, y=gy)
+            
+            # UI Interaction is handled by UI components usually
+            # But for simplicity here, we can set flags that the App checks
+            # or we rely on the UI components `handle_event` method called from App.
             pass
             
         elif event.button == 3: # Right Click
@@ -103,7 +105,6 @@ class InputProcessor:
             if x < grid_w and self.state.spatial_goal_pos:
                 self.state.spatial_goal_pos = None
                 self.network.send_action("CLEAR_SPATIAL_GOAL")
-            pass
 
     def _handle_mouseup(self, event):
         if event.button == 1:

@@ -1,6 +1,9 @@
 import sys
 import pygame
 import collections
+import logging
+
+logger = logging.getLogger("manual_ui")
 
 from .constants import *
 from .state import GameState
@@ -80,10 +83,44 @@ class ManualGame:
         # Update State based on data
         if "last_action" in data:
             self.state.last_action_info = data["last_action"]
-            if self.state.last_action_info and self.state.last_action_info.get("id") == 6:
+            # DEBUG: Log what we receive safely
+            # logger.info(f"[MSG] last_action received: {self.state.last_action_info}")
+            if self.state.last_action_info:
+                action_name = self.state.last_action_info.get("name", "")
+                action_id = self.state.last_action_info.get("id")
                 adata = self.state.last_action_info.get("data", {})
-                self.state.last_click_pos = (adata.get("x", 0), adata.get("y", 0))
-                self.state.last_click_time = pygame.time.get_ticks()
+                now = pygame.time.get_ticks()
+                
+                # Map action ids to key symbols for discrete game actions
+                # Only highlight when we have an actual action_id (discrete action triggered)
+                # Track if action was penalized (had_effect = False)
+                had_effect = self.state.last_action_info.get("had_effect", True)
+                
+                if action_id is not None:
+                    key_sym = None
+                    if action_id == 1:  # ACTION1 = UP
+                        key_sym = "↑"
+                    elif action_id == 2:  # ACTION2 = DOWN
+                        key_sym = "↓"
+                    elif action_id == 3:  # ACTION3 = LEFT
+                        key_sym = "←"
+                    elif action_id == 4:  # ACTION4 = RIGHT
+                        key_sym = "→"
+                    elif action_id == 5:  # ACTION5 = SPACE
+                        key_sym = "␣"
+                    elif action_id == 6:  # ACTION6 = CLICK
+                        key_sym = "␣"  # Click shows as space
+                    elif action_id == 7:  # ACTION7 = ENTER
+                        key_sym = "↵"
+                    
+                    if key_sym:
+                        self.state.key_activations[key_sym] = now
+                        self.state.key_penalized[key_sym] = not had_effect  # Red if no effect
+                
+                # Handle click action
+                if action_id == 6:
+                    self.state.last_click_pos = (adata.get("x", 0), adata.get("y", 0))
+                    self.state.last_click_time = now
 
         if "game_id" in data: self.state.game_id = data["game_id"]
         if "score" in data: self.state.score = data["score"]
@@ -94,14 +131,6 @@ class ManualGame:
             self.state.cursor_pos = target
             if self.state.visual_cursor_pos is None:
                 self.state.visual_cursor_pos = list(target)
-        
-        # Goal sync (optional; normally set by clicking in UI)
-        if "goal" in data:
-            g = data["goal"]
-            if g is None:
-                self.state.spatial_goal_pos = None
-            elif isinstance(g, dict) and "x" in g and "y" in g:
-                self.state.spatial_goal_pos = (int(g["x"]), int(g["y"]))
 
         if "attention" in data:
             self.state.current_attention_map = data["attention"]
@@ -119,23 +148,19 @@ class ManualGame:
 
         if "metrics" in data:
             m = data["metrics"]
-            # Accept both new and legacy metric keys.
-            # PPO now reports: reward, manual_dopamine, manual_pain, trigger, goal_dist, goal_progress
-            # Visualizer may also send legacy aliases like reward_mean.
-            def _append(series_key: str, *candidate_keys: str) -> None:
-                for ck in candidate_keys:
-                    if ck in m and m[ck] is not None:
-                        self.state.metrics_history[series_key].append(float(m[ck]))
-                        return
-
-            _append("reward", "reward", "reward_mean")
-            _append("manual_dopamine", "manual_dopamine", "dopamine")
-            _append("manual_pain", "manual_pain", "pain")
-            _append("trigger", "trigger")
-            _append("cursor_speed", "cursor_speed")
-            _append("action_energy", "action_energy")
-            _append("goal_dist", "goal_dist")
-            _append("goal_progress", "goal_progress")
+            # Extract all metrics for graphs
+            metrics_keys = [
+                "reward", "dopamine", "confidence", "manual_dopamine", 
+                "manual_pain", "trigger", "cursor_speed", "action_energy",
+                "goal_dist", "goal_progress"
+            ]
+            key_map = {"reward": "reward_mean", "confidence": "plan_confidence"}
+            for k in metrics_keys:
+                val_key = key_map.get(k, k)
+                if val_key in m and k in self.state.metrics_history:
+                    val = m[val_key]
+                    if val is not None:
+                        self.state.metrics_history[k].append(float(val))
             if "current_thought" in m:
                 self.state.current_thought = m["current_thought"]
             
@@ -284,7 +309,8 @@ class ManualGame:
 
             # KeyDown events for shortcuts
             if event.type == pygame.KEYDOWN:
-                pass
+                if event.key == pygame.K_b:
+                    self.network.send_action("BREED_MOTIVATION")
 
 
     def _handle_game_select_events(self, events):
