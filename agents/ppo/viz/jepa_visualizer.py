@@ -84,6 +84,7 @@ class JEPAVisualizer:
         
         # Selected point for decoding
         self.selected_idx: Optional[int] = None
+        self.pinned: bool = False  # True = user clicked a point, stays until click outside
         self.decoded_grid: Optional[np.ndarray] = None
         self.decoded_predicted_grid: Optional[np.ndarray] = None
         
@@ -166,6 +167,10 @@ class JEPAVisualizer:
                         self.grids = self.grids[-self.max_points:]
                         self.predicted_grids = self.predicted_grids[-self.max_points:]
                         self.cursors = self.cursors[-self.max_points:]
+                        
+                        # Adjust selected_idx if we're pinned and items were trimmed
+                        if self.pinned and self.selected_idx is not None:
+                            self.selected_idx = max(0, self.selected_idx - 1)
                     
                     # Update PCA if we have enough points
                     if len(self.embeddings) >= 10:
@@ -174,6 +179,10 @@ class JEPAVisualizer:
                             self.pca_embeddings = self.pca.fit_transform(emb_array)
                         except Exception:
                             pass
+                    
+                    # If not pinned, automatically update to show latest point
+                    if not self.pinned:
+                        self._update_to_latest_point()
                             
                 elif update["type"] == "metrics":
                     self.loss_history.append(update["loss"])
@@ -241,7 +250,7 @@ class JEPAVisualizer:
             self._process_updates()
             
             # Clear screen
-            screen.fill((20, 20, 30))
+            screen.fill((0, 0, 0))  # OLED black
             
             # Draw sections
             self._draw_3d_scatter(screen, font, title_font)
@@ -255,12 +264,14 @@ class JEPAVisualizer:
         pygame.quit()
         
     def _handle_click(self, pos: Tuple[int, int]):
-        """Handle click to select a point."""
-        if self.pca_embeddings is None or len(self.pca_embeddings) == 0:
-            return
-            
+        """Handle click to select/pin a point or unpin."""
         # Check if click is in the 3D scatter area (left half)
         if pos[0] > self.width // 2:
+            return
+        
+        if self.pca_embeddings is None or len(self.pca_embeddings) == 0:
+            # No embeddings yet, nothing to select
+            self.pinned = False
             return
             
         # Find nearest point
@@ -270,15 +281,15 @@ class JEPAVisualizer:
         min_dist = float('inf')
         nearest_idx = None
         
+        # Pre-calculate rotation matrices
+        cos_y = np.cos(np.radians(self.rotation_y))
+        sin_y = np.sin(np.radians(self.rotation_y))
+        cos_x = np.cos(np.radians(self.rotation_x))
+        sin_x = np.sin(np.radians(self.rotation_x))
+        
         for i, pca_point in enumerate(self.pca_embeddings):
             # Project 3D to 2D
             x, y, z = pca_point
-            
-            # Apply rotation
-            cos_y = np.cos(np.radians(self.rotation_y))
-            sin_y = np.sin(np.radians(self.rotation_y))
-            cos_x = np.cos(np.radians(self.rotation_x))
-            sin_x = np.sin(np.radians(self.rotation_x))
             
             # Rotate around Y axis
             x_rot = x * cos_y - z * sin_y
@@ -297,9 +308,29 @@ class JEPAVisualizer:
                 nearest_idx = i
                 
         if nearest_idx is not None:
+            # Clicked on a point - pin it
             self.selected_idx = nearest_idx
-            self.decoded_grid = self.grids[nearest_idx]
-            self.decoded_predicted_grid = self.predicted_grids[nearest_idx] if nearest_idx < len(self.predicted_grids) else None
+            self.pinned = True
+            self._update_decoded_grids_for_selected()
+        else:
+            # Clicked in 3D area but not on a point - unpin, go back to live
+            self.pinned = False
+            self._update_to_latest_point()
+            
+    def _update_decoded_grids_for_selected(self):
+        """Update the decoded grids to show the selected point's data."""
+        if self.selected_idx is not None and self.selected_idx < len(self.grids):
+            self.decoded_grid = self.grids[self.selected_idx]
+            if self.selected_idx < len(self.predicted_grids):
+                self.decoded_predicted_grid = self.predicted_grids[self.selected_idx]
+            else:
+                self.decoded_predicted_grid = None
+                
+    def _update_to_latest_point(self):
+        """Update to show the latest/most recent point."""
+        if len(self.grids) > 0:
+            self.selected_idx = len(self.grids) - 1
+            self._update_decoded_grids_for_selected()
             
     def _draw_3d_scatter(self, screen: Surface, font, title_font):
         """Draw the 3D PCA scatter plot."""
@@ -356,12 +387,16 @@ class JEPAVisualizer:
                 color = tuple(c // 3 for c in color)
                 
             # Highlight selected point
-            radius = 6 if i == self.selected_idx else 4
-            border = 2 if i == self.selected_idx else 0
+            is_selected = i == self.selected_idx
+            radius = 8 if is_selected else 4
             
             pygame.draw.circle(screen, color, (sx, sy), radius)
-            if border > 0:
-                pygame.draw.circle(screen, (255, 255, 255), (sx, sy), radius + 2, border)
+            
+            # Draw highlight ring for selected point
+            if is_selected:
+                # Pinned = orange ring, Live = green ring
+                ring_color = (255, 200, 100) if self.pinned else (100, 255, 100)
+                pygame.draw.circle(screen, ring_color, (sx, sy), radius + 3, 2)
                 
         # Draw axes
         axis_len = 60
@@ -408,7 +443,7 @@ class JEPAVisualizer:
         
         if len(self.loss_history) > 1:
             # Loss graph
-            pygame.draw.rect(screen, (40, 40, 50), (panel_x, graph_y, panel_w, graph_h))
+            pygame.draw.rect(screen, (15, 15, 20), (panel_x, graph_y, panel_w, graph_h))
             
             max_loss = max(self.loss_history) if self.loss_history else 1
             min_loss = min(self.loss_history) if self.loss_history else 0
@@ -430,7 +465,7 @@ class JEPAVisualizer:
         graph_y = panel_y + 110
         
         if len(self.acc_history) > 1:
-            pygame.draw.rect(screen, (40, 40, 50), (panel_x, graph_y, panel_w, graph_h))
+            pygame.draw.rect(screen, (15, 15, 20), (panel_x, graph_y, panel_w, graph_h))
             
             points = []
             for i, acc in enumerate(self.acc_history):
@@ -444,6 +479,55 @@ class JEPAVisualizer:
             acc_label = font.render(f"Accuracy: {self.acc_history[-1]*100:.1f}%", True, (100, 255, 100))
             screen.blit(acc_label, (panel_x, graph_y - 15))
             
+    def _get_dynamic_palette(self, grid: np.ndarray) -> dict:
+        """
+        Get a dynamically adjusted palette based on grid background.
+        Matches the logic in agents/manual/ui/renderer.py
+        """
+        # Base palette - must match BASE_PALETTE in agents/manual/constants.py
+        base_palette = {
+            0: (255, 255, 255),  # #FFFFFF - white
+            1: (204, 204, 204),  # #CCCCCC - light gray
+            2: (153, 153, 153),  # #999999 - gray
+            3: (102, 102, 102),  # #666666 - dark gray
+            4: (51, 51, 51),     # #333333 - darker gray
+            5: (0, 0, 0),        # #000000 - black
+            6: (229, 58, 163),   # #E53AA3 - pink/magenta
+            7: (255, 123, 204),  # #FF7BCC - light pink
+            8: (249, 60, 49),    # #F93C31 - red
+            9: (30, 147, 255),   # #1E93FF - blue
+            10: (136, 216, 241), # #88D8F1 - cyan
+            11: (255, 220, 0),   # #FFDC00 - yellow
+            12: (255, 133, 27),  # #FF851B - orange
+            13: (146, 18, 49),   # #921231 - maroon
+            14: (79, 204, 48),   # #4FCC30 - green
+            15: (163, 86, 214),  # #A356D6 - purple
+            # Special markers for cursor
+            254: (255, 0, 255),  # Cursor outline - magenta
+            255: (0, 255, 0),    # Cursor center - green
+        }
+        
+        # Dynamic background logic - find most common value and swap with black
+        flat_grid = grid.flatten()
+        # Filter out cursor markers for background detection
+        valid_vals = flat_grid[(flat_grid < 254)]
+        if len(valid_vals) > 0:
+            # Count occurrences
+            unique, counts = np.unique(valid_vals, return_counts=True)
+            bg_val = unique[np.argmax(counts)]
+            
+            if bg_val != 0:
+                # Create a copy and swap colors
+                palette = base_palette.copy()
+                original_bg_color = palette.get(int(bg_val), (0, 0, 0))
+                # Set dominant to Black
+                palette[int(bg_val)] = (0, 0, 0)
+                # Set 0 to the original color of the dominant (Swap)
+                palette[0] = original_bg_color
+                return palette
+        
+        return base_palette
+    
     def _draw_decoded_grid(self, screen: Surface, font, title_font):
         """Draw both GT and predicted grids for selected point."""
         panel_x = self.width // 2 + 10
@@ -451,28 +535,24 @@ class JEPAVisualizer:
         panel_w = self.width // 2 - 20
         panel_h = self.height - panel_y - 80
         
-        # Title
-        title = title_font.render("Ground Truth vs Predicted (Click a point)", True, (255, 255, 255))
+        # Title - indicate if pinned or live
+        if self.pinned:
+            title_text = f"Pinned Point #{self.selected_idx} (click away to unpin)"
+            title_color = (255, 200, 100)  # Orange for pinned
+        else:
+            title_text = "Live View (click a point to pin)"
+            title_color = (100, 255, 100)  # Green for live
+            
+        title = title_font.render(title_text, True, title_color)
         screen.blit(title, (panel_x, panel_y))
         
         if self.decoded_grid is None:
-            text = font.render("Click a point in the 3D view to see its grid state", True, (150, 150, 150))
+            text = font.render("Waiting for embeddings...", True, (150, 150, 150))
             screen.blit(text, (panel_x, panel_y + 30))
             return
         
-        # ARC color palette
-        arc_colors = [
-            (0, 0, 0),        # 0: black
-            (0, 116, 217),    # 1: blue
-            (255, 65, 54),    # 2: red
-            (46, 204, 64),    # 3: green
-            (255, 220, 0),    # 4: yellow
-            (170, 170, 170),  # 5: gray
-            (240, 18, 190),   # 6: magenta
-            (255, 133, 27),   # 7: orange
-            (127, 219, 255),  # 8: cyan
-            (135, 12, 37),    # 9: maroon
-        ]
+        # Get dynamic palette based on ground truth grid background
+        arc_colors = self._get_dynamic_palette(self.decoded_grid)
         
         # Calculate grid sizes - show two grids side by side
         grid_y = panel_y + 40
@@ -487,7 +567,8 @@ class JEPAVisualizer:
         for y in range(self.decoded_grid.shape[0]):
             for x in range(self.decoded_grid.shape[1]):
                 val = int(self.decoded_grid[y, x])
-                color = arc_colors[val % 10] if val < 10 else (100, 100, 100)
+                # Look up color, fallback to dark gray for unknown values
+                color = arc_colors.get(val, arc_colors.get(val % 16, (50, 50, 50)))
                 
                 rect = pygame.Rect(
                     panel_x + x * cell_size,
@@ -506,7 +587,8 @@ class JEPAVisualizer:
             for y in range(self.decoded_predicted_grid.shape[0]):
                 for x in range(self.decoded_predicted_grid.shape[1]):
                     val = int(self.decoded_predicted_grid[y, x])
-                    color = arc_colors[val % 10] if val < 10 else (100, 100, 100)
+                    # Look up color, fallback to dark gray for unknown values
+                    color = arc_colors.get(val, arc_colors.get(val % 16, (50, 50, 50)))
                     
                     rect = pygame.Rect(
                         pred_x + x * cell_size,

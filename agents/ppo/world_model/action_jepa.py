@@ -245,12 +245,13 @@ class ActionJEPA(nn.Module):
         # Grid decoder: reconstruct grid from latent embedding
         # Simple MLP decoder for visualization (not for training loss)
         num_patches = (grid_size // patch_size) ** 2
+        self.num_colors = 16  # Match BASE_PALETTE from constants
         self.grid_decoder = nn.Sequential(
             nn.Linear(embed_dim, embed_dim * 2),
             nn.GELU(),
             nn.Linear(embed_dim * 2, embed_dim * 4),
             nn.GELU(),
-            nn.Linear(embed_dim * 4, grid_size * grid_size * 10),  # 10 possible colors
+            nn.Linear(embed_dim * 4, grid_size * grid_size * self.num_colors),
         ).to(self.device)
         self.decoder_grid_size = grid_size
         
@@ -400,11 +401,11 @@ class ActionJEPA(nn.Module):
             latent_loss = torch.tensor(0.0, device=self.device)
         
         # Loss 4: Grid reconstruction (for visualization decoder training)
-        decoded_logits = self.grid_decoder(visual_cls)  # (B, grid_size * grid_size * 10)
-        decoded_logits = decoded_logits.view(states.shape[0], self.decoder_grid_size, self.decoder_grid_size, 10)
-        decoded_logits = decoded_logits.permute(0, 3, 1, 2)  # (B, 10, H, W)
-        # Clamp grid values to valid class range (0-9), treating cursor markers as background
-        states_clamped = states.long().clamp(0, 9)
+        decoded_logits = self.grid_decoder(visual_cls)  # (B, grid_size * grid_size * num_colors)
+        decoded_logits = decoded_logits.view(states.shape[0], self.decoder_grid_size, self.decoder_grid_size, self.num_colors)
+        decoded_logits = decoded_logits.permute(0, 3, 1, 2)  # (B, num_colors, H, W)
+        # Clamp grid values to valid class range (0-15), treating cursor markers as 0
+        states_clamped = states.long().clamp(0, self.num_colors - 1)
         reconstruction_loss = F.cross_entropy(decoded_logits, states_clamped)
         
         # Total loss
@@ -493,8 +494,8 @@ class ActionJEPA(nn.Module):
         self.eval()
         
         emb_t = torch.tensor(embedding, dtype=torch.float32, device=self.device).unsqueeze(0)
-        logits = self.grid_decoder(emb_t)  # (1, grid_size * grid_size * 10)
-        logits = logits.view(1, self.decoder_grid_size, self.decoder_grid_size, 10)
+        logits = self.grid_decoder(emb_t)  # (1, grid_size * grid_size * num_colors)
+        logits = logits.view(1, self.decoder_grid_size, self.decoder_grid_size, self.num_colors)
         
         # Get argmax for each cell
         grid = logits.argmax(dim=-1).squeeze(0).cpu().numpy().astype(np.uint8)
@@ -516,8 +517,8 @@ class ActionJEPA(nn.Module):
         grid_t = torch.tensor(grid, dtype=torch.long, device=self.device).unsqueeze(0)
         emb = self.visual_encoder(grid_t, return_all_tokens=False)  # (1, embed_dim)
         
-        logits = self.grid_decoder(emb)  # (1, grid_size * grid_size * 10)
-        logits = logits.view(1, self.decoder_grid_size, self.decoder_grid_size, 10)
+        logits = self.grid_decoder(emb)  # (1, grid_size * grid_size * num_colors)
+        logits = logits.view(1, self.decoder_grid_size, self.decoder_grid_size, self.num_colors)
         
         reconstructed = logits.argmax(dim=-1).squeeze(0).cpu().numpy().astype(np.uint8)
         return reconstructed
