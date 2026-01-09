@@ -28,41 +28,6 @@ else:
 
 from .templates.random_agent import Random
 
-ReasoningAgent: type[Agent] | None
-try:  # pragma: no cover
-    from .templates.reasoning_agent import ReasoningAgent as _ReasoningAgent
-except ModuleNotFoundError:  # pragma: no cover
-    ReasoningAgent = None
-else:
-    ReasoningAgent = _ReasoningAgent
-
-# Optional / heavyweight agent stacks. These are best-effort imports so that
-# importing `agents` (and by extension `agents.structs`) works in minimal
-# environments where some ML/observability deps may not be installed.
-try:  # pragma: no cover
-    from .templates.langgraph_functional_agent import LangGraphFunc, LangGraphTextOnly
-    from .templates.langgraph_random_agent import LangGraphRandom
-    from .templates.langgraph_thinking import LangGraphThinking
-except ModuleNotFoundError:  # pragma: no cover
-    LangGraphFunc = None  # type: ignore[assignment]
-    LangGraphTextOnly = None  # type: ignore[assignment]
-    LangGraphRandom = None  # type: ignore[assignment]
-    LangGraphThinking = None  # type: ignore[assignment]
-
-try:  # pragma: no cover
-    from .templates.llm_agents import LLM, FastLLM, GuidedLLM, ReasoningLLM
-except ModuleNotFoundError:  # pragma: no cover
-    LLM = None  # type: ignore[assignment]
-    FastLLM = None  # type: ignore[assignment]
-    GuidedLLM = None  # type: ignore[assignment]
-    ReasoningLLM = None  # type: ignore[assignment]
-
-try:  # pragma: no cover
-    from .templates.smolagents import SmolCodingAgent, SmolVisionAgent
-except ModuleNotFoundError:  # pragma: no cover
-    SmolCodingAgent = None  # type: ignore[assignment]
-    SmolVisionAgent = None  # type: ignore[assignment]
-
 load_dotenv()
 
 AVAILABLE_AGENTS: dict[str, Type[Agent]] = {
@@ -75,25 +40,11 @@ AVAILABLE_AGENTS: dict[str, Type[Agent]] = {
 for rec in Recorder.list():
     AVAILABLE_AGENTS[rec] = Playback
 
-# update the agent dictionary to include subclasses of LLM class
-if ReasoningAgent is not None:
-    AVAILABLE_AGENTS["reasoningagent"] = ReasoningAgent
-
 __all__ = [
     "Swarm",
     "Random",
-    "LangGraphFunc",
-    "LangGraphTextOnly",
-    "LangGraphThinking",
-    "LangGraphRandom",
-    "LLM",
-    "FastLLM",
-    "ReasoningLLM",
-    "GuidedLLM",
-    "ReasoningAgent",
     "Manual",
-    "SmolCodingAgent",
-    "SmolVisionAgent",
+    "PPOAgent",
     "Agent",
     "Recorder",
     "Playback",
