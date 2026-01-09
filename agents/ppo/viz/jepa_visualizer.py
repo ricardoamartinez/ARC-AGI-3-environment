@@ -42,6 +42,25 @@ ACTION_NAMES = {
     8: "SPACE", 9: "ENTER"
 }
 
+# Color mapping modes
+COLOR_MODES = [
+    "action_type",      # Color by action type (CLICK, MOVE, SPACE, ENTER)
+    "effectiveness",    # Green = effective, Red = ineffective
+    "latent_rgb",       # Map PCA XYZ to RGB
+    "recency",          # Newer = brighter, older = dimmer
+    "latent_distance",  # Distance from origin in latent space
+    "state_change",     # How much the state changed (grid difference)
+]
+
+COLOR_MODE_NAMES = {
+    "action_type": "Action Type",
+    "effectiveness": "Effective vs Ineffective", 
+    "latent_rgb": "Latent Space",
+    "recency": "Recency (newer=bright)",
+    "latent_distance": "Latent Distance",
+    "state_change": "State Change Magnitude",
+}
+
 
 class JEPAVisualizer:
     """
@@ -56,8 +75,8 @@ class JEPAVisualizer:
     
     def __init__(
         self,
-        width: int = 800,
-        height: int = 600,
+        width: int = 1000,
+        height: int = 700,
         title: str = "ActionJEPA Embedding Visualizer",
     ):
         self.width = width
@@ -69,7 +88,9 @@ class JEPAVisualizer:
         self.embeddings: List[np.ndarray] = []
         self.action_indices: List[int] = []
         self.had_effects: List[bool] = []
-        self.grids: List[np.ndarray] = []  # Ground truth grids
+        self.grids: List[np.ndarray] = []  # Ground truth grids (before action)
+        self.next_grids: List[Optional[np.ndarray]] = []  # Grids after action
+        self.state_changes: List[float] = []  # Normalized state change magnitude
         self.predicted_grids: List[Optional[np.ndarray]] = []  # Predicted/decoded grids
         self.cursors: List[Tuple[float, float]] = []
         
@@ -95,6 +116,9 @@ class JEPAVisualizer:
         self.dragging = False
         self.last_mouse_pos = (0, 0)
         
+        # Color mode for points
+        self.color_mode_idx = 0  # Index into COLOR_MODES
+        
         # Thread-safe update queue
         self.update_queue = queue.Queue()
         
@@ -119,6 +143,7 @@ class JEPAVisualizer:
         grid: np.ndarray,
         cursor: Tuple[float, float],
         predicted_grid: Optional[np.ndarray] = None,
+        next_grid: Optional[np.ndarray] = None,
     ):
         """Add a new embedding point (thread-safe)."""
         self.update_queue.put({
@@ -128,6 +153,7 @@ class JEPAVisualizer:
             "had_effect": had_effect,
             "grid": grid.copy(),
             "predicted_grid": predicted_grid.copy() if predicted_grid is not None else None,
+            "next_grid": next_grid.copy() if next_grid is not None else None,
             "cursor": cursor,
         })
         
@@ -159,12 +185,29 @@ class JEPAVisualizer:
                     self.predicted_grids.append(update.get("predicted_grid"))
                     self.cursors.append(update["cursor"])
                     
+                    # Store next_grid and calculate state change
+                    next_grid = update.get("next_grid")
+                    self.next_grids.append(next_grid)
+                    
+                    # Calculate state change magnitude (normalized 0-1)
+                    if next_grid is not None:
+                        grid = update["grid"]
+                        # Count differing cells, normalize by total cells
+                        diff_count = np.sum(grid != next_grid)
+                        total_cells = grid.shape[0] * grid.shape[1]
+                        state_change = diff_count / total_cells
+                    else:
+                        state_change = 0.0
+                    self.state_changes.append(state_change)
+                    
                     # Trim to max points
                     if len(self.embeddings) > self.max_points:
                         self.embeddings = self.embeddings[-self.max_points:]
                         self.action_indices = self.action_indices[-self.max_points:]
                         self.had_effects = self.had_effects[-self.max_points:]
                         self.grids = self.grids[-self.max_points:]
+                        self.next_grids = self.next_grids[-self.max_points:]
+                        self.state_changes = self.state_changes[-self.max_points:]
                         self.predicted_grids = self.predicted_grids[-self.max_points:]
                         self.cursors = self.cursors[-self.max_points:]
                         
@@ -245,6 +288,23 @@ class JEPAVisualizer:
                         self.zoom = min(5.0, self.zoom * 1.2)
                     elif event.y < 0:  # Scroll down
                         self.zoom = max(0.2, self.zoom / 1.2)
+                elif event.type == pygame.KEYDOWN:
+                    # Color mode switching
+                    if event.key == pygame.K_c:
+                        # Cycle to next color mode
+                        self.color_mode_idx = (self.color_mode_idx + 1) % len(COLOR_MODES)
+                    elif event.key == pygame.K_1:
+                        self.color_mode_idx = 0  # action_type
+                    elif event.key == pygame.K_2:
+                        self.color_mode_idx = 1  # effectiveness
+                    elif event.key == pygame.K_3:
+                        self.color_mode_idx = 2  # latent_rgb
+                    elif event.key == pygame.K_4:
+                        self.color_mode_idx = 3  # recency
+                    elif event.key == pygame.K_5:
+                        self.color_mode_idx = 4  # latent_distance
+                    elif event.key == pygame.K_6:
+                        self.color_mode_idx = 5  # state_change
             
             # Process pending updates
             self._process_updates()
@@ -331,11 +391,95 @@ class JEPAVisualizer:
         if len(self.grids) > 0:
             self.selected_idx = len(self.grids) - 1
             self._update_decoded_grids_for_selected()
+    
+    def _get_point_color(self, idx: int, pca_point: np.ndarray) -> Tuple[int, int, int]:
+        """Get color for a point based on current color mode."""
+        mode = COLOR_MODES[self.color_mode_idx]
+        
+        if mode == "action_type":
+            # Color by action type
+            action_idx = self.action_indices[idx]
+            had_effect = self.had_effects[idx]
+            color = ACTION_COLORS.get(action_idx, (200, 200, 200))
+            # Dim if action had no effect
+            if not had_effect:
+                color = tuple(c // 3 for c in color)
+            return color
+            
+        elif mode == "effectiveness":
+            # Green = effective, Red = ineffective
+            had_effect = self.had_effects[idx]
+            if had_effect:
+                return (50, 255, 50)  # Bright green
+            else:
+                return (255, 50, 50)  # Bright red
+                
+        elif mode == "latent_rgb":
+            # Map PCA XYZ coordinates to RGB
+            # Normalize PCA coordinates to 0-1 range
+            if self.pca_embeddings is not None and len(self.pca_embeddings) > 0:
+                mins = self.pca_embeddings.min(axis=0)
+                maxs = self.pca_embeddings.max(axis=0)
+                ranges = maxs - mins
+                ranges = np.where(ranges < 1e-6, 1.0, ranges)  # Avoid div by zero
+                normalized = (pca_point - mins) / ranges
+                r = int(normalized[0] * 255)
+                g = int(normalized[1] * 255)
+                b = int(normalized[2] * 255)
+                return (r, g, b)
+            return (128, 128, 128)
+            
+        elif mode == "recency":
+            # Newer = brighter, older = dimmer
+            total = len(self.embeddings)
+            if total > 0:
+                recency = idx / total  # 0 = oldest, 1 = newest
+                brightness = int(50 + recency * 205)
+                return (brightness, brightness, brightness)
+            return (128, 128, 128)
+            
+        elif mode == "latent_distance":
+            # Distance from origin in latent space - use HSV color wheel
+            if self.pca_embeddings is not None and len(self.pca_embeddings) > 0:
+                # Calculate distance from center
+                center = self.pca_embeddings.mean(axis=0)
+                dist = np.linalg.norm(pca_point - center)
+                max_dist = np.max(np.linalg.norm(self.pca_embeddings - center, axis=1))
+                if max_dist > 1e-6:
+                    norm_dist = dist / max_dist
+                else:
+                    norm_dist = 0.5
+                # Map to color: close=blue, far=red
+                r = int(norm_dist * 255)
+                b = int((1 - norm_dist) * 255)
+                g = int((1 - abs(norm_dist - 0.5) * 2) * 200)  # Green in middle
+                return (r, g, b)
+            return (128, 128, 128)
+        
+        elif mode == "state_change":
+            # Color by how much the state changed after the action
+            if idx < len(self.state_changes):
+                change = self.state_changes[idx]
+                # Scale change for visibility (most changes are small)
+                # 0 = no change (dark blue), high change = bright yellow/white
+                scaled = min(1.0, change * 10)  # Scale up small changes
+                if change == 0:
+                    return (30, 30, 80)  # Dark blue for no change
+                else:
+                    # Gradient: small change = cyan, large change = yellow/white
+                    r = int(scaled * 255)
+                    g = int(scaled * 255)
+                    b = int((1 - scaled) * 200 + 55)
+                    return (r, g, b)
+            return (128, 128, 128)
+        
+        return (200, 200, 200)  # Default fallback
             
     def _draw_3d_scatter(self, screen: Surface, font, title_font):
         """Draw the 3D PCA scatter plot."""
-        # Title
-        title = title_font.render("Joint Embedding Space (PCA 3D)", True, (255, 255, 255))
+        # Title with color mode
+        mode_name = COLOR_MODE_NAMES.get(COLOR_MODES[self.color_mode_idx], "Unknown")
+        title = title_font.render(f"PCA 3D | Color: {mode_name}", True, (255, 255, 255))
         screen.blit(title, (10, 10))
         
         if self.pca_embeddings is None or len(self.pca_embeddings) < 3:
@@ -376,15 +520,9 @@ class JEPAVisualizer:
         
         # Draw points
         for i, sx, sy, _ in screen_points:
-            action_idx = self.action_indices[i]
-            had_effect = self.had_effects[i]
-            
-            # Base color from action type
-            color = ACTION_COLORS.get(action_idx, (200, 200, 200))
-            
-            # Dim if action had no effect
-            if not had_effect:
-                color = tuple(c // 3 for c in color)
+            # Get color based on current color mode
+            pca_point = self.pca_embeddings[i]
+            color = self._get_point_color(i, pca_point)
                 
             # Highlight selected point
             is_selected = i == self.selected_idx
@@ -395,7 +533,7 @@ class JEPAVisualizer:
             # Draw highlight ring for selected point
             if is_selected:
                 # Pinned = orange ring, Live = green ring
-                ring_color = (255, 200, 100) if self.pinned else (100, 255, 100)
+                ring_color = (255, 200, 100) if self.pinned else (255, 255, 255)  # Orange if pinned, white if live
                 pygame.draw.circle(screen, ring_color, (sx, sy), radius + 3, 2)
                 
         # Draw axes
@@ -424,6 +562,11 @@ class JEPAVisualizer:
         points_text = f"Points: {len(self.embeddings)} | Drag: rotate | Scroll: zoom ({self.zoom:.1f}x) | Click: decode"
         points_surf = font.render(points_text, True, (150, 150, 150))
         screen.blit(points_surf, (10, self.height - 60))
+        
+        # Color mode help
+        color_help = "[C] cycle | [1]Action [2]Effect [3]Latent [4]Recency [5]Distance [6]StateChg"
+        color_surf = font.render(color_help, True, (100, 150, 200))
+        screen.blit(color_surf, (10, self.height - 40))
         
     def _draw_metrics(self, screen: Surface, font, title_font):
         """Draw training metrics graphs."""
@@ -531,9 +674,9 @@ class JEPAVisualizer:
     def _draw_decoded_grid(self, screen: Surface, font, title_font):
         """Draw both GT and predicted grids for selected point."""
         panel_x = self.width // 2 + 10
-        panel_y = 210
+        panel_y = 200  # Moved up
         panel_w = self.width // 2 - 20
-        panel_h = self.height - panel_y - 80
+        panel_h = self.height - panel_y - 50  # More height available
         
         # Title - indicate if pinned or live
         if self.pinned:
@@ -541,7 +684,7 @@ class JEPAVisualizer:
             title_color = (255, 200, 100)  # Orange for pinned
         else:
             title_text = "Live View (click a point to pin)"
-            title_color = (100, 255, 100)  # Green for live
+            title_color = (255, 255, 255)  # White for live
             
         title = title_font.render(title_text, True, title_color)
         screen.blit(title, (panel_x, panel_y))
@@ -554,53 +697,68 @@ class JEPAVisualizer:
         # Get dynamic palette based on ground truth grid background
         arc_colors = self._get_dynamic_palette(self.decoded_grid)
         
-        # Calculate grid sizes - show two grids side by side
-        grid_y = panel_y + 40
-        half_width = (panel_w - 20) // 2
-        grid_display_size = min(half_width, panel_h - 80)
-        cell_size = max(1, grid_display_size // self.decoded_grid.shape[0])
+        # Calculate grid sizes - show three grids side by side with small gaps
+        grid_y = panel_y + 30
+        gap = 4  # Small gap between grids
+        available_width = panel_w - 2 * gap  # Total width minus gaps
+        available_height = panel_h - 50  # More height available for grids
+        
+        # Each grid gets 1/3 of available width
+        grid_width = available_width // 3
+        # Calculate cell size to fit grid in available space - use the larger of width/height
+        grid_dim = self.decoded_grid.shape[0]  # Assume square grid
+        # Make grids as big as possible within constraints
+        max_cell_from_width = grid_width // grid_dim
+        max_cell_from_height = available_height // grid_dim
+        cell_size = max(2, min(max_cell_from_width, max_cell_from_height))
+        actual_grid_size = cell_size * grid_dim
         
         # Draw Ground Truth grid (left)
-        gt_label = font.render("Ground Truth", True, (100, 255, 100))
-        screen.blit(gt_label, (panel_x + half_width // 2 - 40, grid_y - 18))
+        gt_x = panel_x
+        gt_label = font.render("GT", True, (100, 255, 100))
+        screen.blit(gt_label, (gt_x + actual_grid_size // 2 - 8, grid_y - 16))
         
-        for y in range(self.decoded_grid.shape[0]):
-            for x in range(self.decoded_grid.shape[1]):
+        for y in range(grid_dim):
+            for x in range(grid_dim):
                 val = int(self.decoded_grid[y, x])
-                # Look up color, fallback to dark gray for unknown values
                 color = arc_colors.get(val, arc_colors.get(val % 16, (50, 50, 50)))
-                
-                rect = pygame.Rect(
-                    panel_x + x * cell_size,
-                    grid_y + y * cell_size,
-                    cell_size,  # No gap - no gridlines
-                    cell_size,
-                )
+                rect = pygame.Rect(gt_x + x * cell_size, grid_y + y * cell_size, cell_size, cell_size)
                 pygame.draw.rect(screen, color, rect)
         
-        # Draw Predicted grid (right)
-        pred_x = panel_x + half_width + 10
-        pred_label = font.render("Predicted (Decoded)", True, (255, 200, 100))
-        screen.blit(pred_label, (pred_x + half_width // 2 - 55, grid_y - 18))
+        # Draw Predicted grid (middle)
+        pred_x = gt_x + actual_grid_size + gap
+        pred_label = font.render("Pred", True, (255, 200, 100))
+        screen.blit(pred_label, (pred_x + actual_grid_size // 2 - 14, grid_y - 16))
         
         if self.decoded_predicted_grid is not None:
-            for y in range(self.decoded_predicted_grid.shape[0]):
-                for x in range(self.decoded_predicted_grid.shape[1]):
+            for y in range(grid_dim):
+                for x in range(grid_dim):
                     val = int(self.decoded_predicted_grid[y, x])
-                    # Look up color, fallback to dark gray for unknown values
                     color = arc_colors.get(val, arc_colors.get(val % 16, (50, 50, 50)))
+                    rect = pygame.Rect(pred_x + x * cell_size, grid_y + y * cell_size, cell_size, cell_size)
+                    pygame.draw.rect(screen, color, rect)
+            
+            # Draw Error grid (right) - bitmap showing differences
+            error_x = pred_x + actual_grid_size + gap
+            error_label = font.render("Error", True, (255, 100, 100))
+            screen.blit(error_label, (error_x + actual_grid_size // 2 - 16, grid_y - 16))
+            
+            for y in range(grid_dim):
+                for x in range(grid_dim):
+                    gt_val = int(self.decoded_grid[y, x])
+                    pred_val = int(self.decoded_predicted_grid[y, x])
                     
-                    rect = pygame.Rect(
-                        pred_x + x * cell_size,
-                        grid_y + y * cell_size,
-                        cell_size,  # No gap - no gridlines
-                        cell_size,
-                    )
+                    if gt_val == pred_val:
+                        color = (20, 20, 20)  # Dark - correct
+                    else:
+                        color = (255, 50, 50)  # Red - error
+                    
+                    rect = pygame.Rect(error_x + x * cell_size, grid_y + y * cell_size, cell_size, cell_size)
                     pygame.draw.rect(screen, color, rect)
         else:
             # No predicted grid available
-            no_pred = font.render("(No prediction available)", True, (100, 100, 100))
-            screen.blit(no_pred, (pred_x + 10, grid_y + grid_display_size // 2))
+            no_pred = font.render("(No prediction)", True, (100, 100, 100))
+            screen.blit(no_pred, (pred_x + 5, grid_y + actual_grid_size // 2))
                 
         # Show selected point info
         if self.selected_idx is not None:
@@ -625,15 +783,59 @@ class JEPAVisualizer:
                     pass
             
     def _draw_legend(self, screen: Surface, font):
-        """Draw action type legend."""
+        """Draw legend based on current color mode."""
         legend_x = 10
-        legend_y = self.height - 40
+        legend_y = self.height - 20
         
-        # Effective vs ineffective
-        pygame.draw.circle(screen, (200, 200, 200), (legend_x + 5, legend_y + 5), 5)
-        text = font.render("Effective", True, (200, 200, 200))
-        screen.blit(text, (legend_x + 15, legend_y))
+        mode = COLOR_MODES[self.color_mode_idx]
         
-        pygame.draw.circle(screen, (60, 60, 60), (legend_x + 100, legend_y + 5), 5)
-        text = font.render("Ineffective (dim)", True, (100, 100, 100))
-        screen.blit(text, (legend_x + 110, legend_y))
+        if mode == "action_type":
+            # Show action type colors
+            items = [
+                ((255, 100, 100), "Click"),
+                ((100, 255, 100), "Move"),
+                ((100, 100, 255), "Space"),
+                ((255, 255, 100), "Enter"),
+            ]
+            x_offset = 0
+            for color, label in items:
+                pygame.draw.circle(screen, color, (legend_x + x_offset + 5, legend_y + 5), 5)
+                text = font.render(label, True, color)
+                screen.blit(text, (legend_x + x_offset + 15, legend_y))
+                x_offset += 70
+                
+        elif mode == "effectiveness":
+            pygame.draw.circle(screen, (50, 255, 50), (legend_x + 5, legend_y + 5), 5)
+            text = font.render("Effective", True, (50, 255, 50))
+            screen.blit(text, (legend_x + 15, legend_y))
+            pygame.draw.circle(screen, (255, 50, 50), (legend_x + 100, legend_y + 5), 5)
+            text = font.render("Ineffective", True, (255, 50, 50))
+            screen.blit(text, (legend_x + 110, legend_y))
+            
+        elif mode == "latent_rgb":
+            text = font.render("PCA: X→Red  Y→Green  Z→Blue", True, (150, 150, 150))
+            screen.blit(text, (legend_x, legend_y))
+            
+        elif mode == "recency":
+            pygame.draw.circle(screen, (50, 50, 50), (legend_x + 5, legend_y + 5), 5)
+            text = font.render("Old", True, (100, 100, 100))
+            screen.blit(text, (legend_x + 15, legend_y))
+            pygame.draw.circle(screen, (255, 255, 255), (legend_x + 60, legend_y + 5), 5)
+            text = font.render("New", True, (255, 255, 255))
+            screen.blit(text, (legend_x + 70, legend_y))
+            
+        elif mode == "latent_distance":
+            pygame.draw.circle(screen, (0, 0, 255), (legend_x + 5, legend_y + 5), 5)
+            text = font.render("Near center", True, (100, 100, 255))
+            screen.blit(text, (legend_x + 15, legend_y))
+            pygame.draw.circle(screen, (255, 0, 0), (legend_x + 120, legend_y + 5), 5)
+            text = font.render("Far from center", True, (255, 100, 100))
+            screen.blit(text, (legend_x + 130, legend_y))
+            
+        elif mode == "state_change":
+            pygame.draw.circle(screen, (30, 30, 80), (legend_x + 5, legend_y + 5), 5)
+            text = font.render("No change", True, (80, 80, 150))
+            screen.blit(text, (legend_x + 15, legend_y))
+            pygame.draw.circle(screen, (255, 255, 100), (legend_x + 100, legend_y + 5), 5)
+            text = font.render("Large change", True, (255, 255, 100))
+            screen.blit(text, (legend_x + 110, legend_y))

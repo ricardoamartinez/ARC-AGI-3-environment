@@ -321,6 +321,7 @@ def run_rtac_training(agent) -> None:
                                 grid=current_grid,
                                 cursor=(float(agent.cursor_x), float(agent.cursor_y)),
                                 predicted_grid=predicted_grid,
+                                next_grid=next_grid,
                             )
                         except Exception as e:
                             pass  # Don't crash training for viz errors
