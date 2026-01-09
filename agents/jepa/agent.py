@@ -17,10 +17,15 @@ from .training import run_rtac_training, run_sac_training, run_world_model_train
 
 logger = logging.getLogger()
 
-class PPOAgent(Agent):
+class JEPAAgent(Agent):
     """
-    Real-Time Actor-Critic (RTAC) Agent with Eligibility Traces.
-    Revised for Differentiability, Correct Optimization, and Recurrence.
+    V-JEPA 2 RL Agent for ARC-AGI-3.
+    
+    Uses Video Joint Embedding Predictive Architecture for:
+    - Visual-action coordination in joint embedding space
+    - Predicting action effectiveness from visual state
+    - Fast adaptation to avoid ineffective actions
+    - Real-time latent space visualization
     """
     
     @staticmethod
@@ -91,7 +96,7 @@ class PPOAgent(Agent):
         games_with_thumbnails = []
         
         def fetch_thumb(g):
-            thumb = PPOAgent.fetch_game_thumbnail(root_url, headers, g["game_id"])
+            thumb = JEPAAgent.fetch_game_thumbnail(root_url, headers, g["game_id"])
             return {**g, "thumbnail": thumb}
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -174,36 +179,36 @@ class PPOAgent(Agent):
         # Incremented whenever the goal changes so the trainer can reset traces/LSTM cleanly.
         self.goal_version: int = 0
         # Goal shaping is a debug/training aid for cursor navigation.
-        # Default ON (so it learns quickly). Set PPO_GOAL_SHAPING=0 to force OFF.
-        self.goal_shaping_enabled: bool = os.environ.get("PPO_GOAL_SHAPING", "1") != "0"
+        # Default ON (so it learns quickly). Set JEPA_GOAL_SHAPING=0 to force OFF.
+        self.goal_shaping_enabled: bool = os.environ.get("JEPA_GOAL_SHAPING", "1") != "0"
 
         # Optional: allow headless training (no pygame subprocess). Useful for non-interactive runs.
-        no_gui = os.environ.get("PPO_NO_GUI", "0") == "1"
+        no_gui = os.environ.get("JEPA_NO_GUI", "0") == "1"
         if not no_gui:
             self._start_gui()
 
         # Optional: set a fixed spatial goal from env (format: "x,y").
         # Default: only applied in headless runs, so UI runs still rely on clicking a goal.
-        allow_goal_env = no_gui or os.environ.get("PPO_GOAL_FROM_ENV_IN_UI", "0") == "1"
-        fixed_goal = os.environ.get("PPO_FIXED_GOAL", "").strip()
+        allow_goal_env = no_gui or os.environ.get("JEPA_GOAL_FROM_ENV_IN_UI", "0") == "1"
+        fixed_goal = os.environ.get("JEPA_FIXED_GOAL", "").strip()
         if allow_goal_env and fixed_goal:
             try:
                 sx, sy = fixed_goal.split(",", 1)
                 self.spatial_goal = (int(sx), int(sy))
                 self.goal_version += 1
-                logger.info(f"Fixed goal from PPO_FIXED_GOAL: {self.spatial_goal}")
+                logger.info(f"Fixed goal from JEPA_FIXED_GOAL: {self.spatial_goal}")
             except Exception:
-                logger.warning(f"Invalid PPO_FIXED_GOAL='{fixed_goal}' (expected 'x,y'). Ignoring.")
+                logger.warning(f"Invalid JEPA_FIXED_GOAL='{fixed_goal}' (expected 'x,y'). Ignoring.")
 
         # Optional: pick a random goal at startup (useful for headless convergence tests).
-        # If PPO_FIXED_GOAL is set, it wins.
-        if allow_goal_env and self.spatial_goal is None and os.environ.get("PPO_RANDOM_GOAL", "0") == "1":
+        # If JEPA_FIXED_GOAL is set, it wins.
+        if allow_goal_env and self.spatial_goal is None and os.environ.get("JEPA_RANDOM_GOAL", "0") == "1":
             # ARC env uses a 64x64 grid for cursor learning.
             gx = random.randint(0, 63)
             gy = random.randint(0, 63)
             self.spatial_goal = (gx, gy)
             self.goal_version += 1
-            logger.info(f"Random goal from PPO_RANDOM_GOAL: {self.spatial_goal}")
+            logger.info(f"Random goal from JEPA_RANDOM_GOAL: {self.spatial_goal}")
 
         # Always start with a default goal so training begins immediately.
         if self.spatial_goal is None:
@@ -315,7 +320,7 @@ class PPOAgent(Agent):
         # PPOAgent overrides Agent.main(), so we must initialize the base timer here
         # (otherwise Agent.cleanup() will print epoch seconds).
         self.timer = time.time()
-        trainer = os.environ.get("PPO_TRAINER", "sac").strip().lower()
+        trainer = os.environ.get("JEPA_TRAINER", "sac").strip().lower()
         if trainer == "rtac":
             run_rtac_training(self)
         elif trainer in ("world_model", "wm", "jepa"):

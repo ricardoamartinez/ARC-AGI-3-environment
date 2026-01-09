@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 from types import SimpleNamespace
 
-from agents.ppo.envs.arc_env import ARCGymEnv
-from agents.ppo.world_model import WorldModel
+from agents.jepa.envs.arc_env import ARCGymEnv
+from agents.jepa.world_model import WorldModel
 from agents.structs import FrameData, GameState
 
 
@@ -53,12 +53,12 @@ def test_world_model_train_step_mask_and_variance() -> None:
 @pytest.mark.unit
 def test_arc_env_sparse_reward_override_and_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     # Avoid any API calls: reuse a dummy FrameData as the "latest frame".
-    monkeypatch.setenv("PPO_DISABLE_RESET_BOOTSTRAP", "1")
-    monkeypatch.setenv("PPO_ALLOW_GAME_ACTIONS", "0")
-    monkeypatch.setenv("PPO_ACTION_MODE", "delta")
+    monkeypatch.setenv("JEPA_DISABLE_RESET_BOOTSTRAP", "1")
+    monkeypatch.setenv("JEPA_ALLOW_GAME_ACTIONS", "0")
+    monkeypatch.setenv("JEPA_ACTION_MODE", "delta")
 
-    monkeypatch.setenv("PPO_SPARSE_REWARD", "1")
-    monkeypatch.setenv("PPO_SUCCESS_BONUS", "7.0")
+    monkeypatch.setenv("JEPA_SPARSE_REWARD", "1")
+    monkeypatch.setenv("JEPA_SUCCESS_BONUS", "7.0")
 
     grid = np.zeros((64, 64), dtype=np.uint8)
     frame = FrameData(
@@ -67,6 +67,11 @@ def test_arc_env_sparse_reward_override_and_metrics(monkeypatch: pytest.MonkeyPa
         state=GameState.NOT_FINISHED,
         score=0,
     )
+    
+    # Mock agent with take_action that returns the frame
+    def mock_take_action(action, action_data=None):
+        return frame
+    
     agent = SimpleNamespace(
         game_id="dummy",
         cursor_x=32.0,
@@ -77,6 +82,7 @@ def test_arc_env_sparse_reward_override_and_metrics(monkeypatch: pytest.MonkeyPa
         goal_version=0,
         goal_shaping_enabled=False,
         frames=[frame],
+        take_action=mock_take_action,
     )
 
     env = ARCGymEnv(agent, max_steps=10)
@@ -90,4 +96,3 @@ def test_arc_env_sparse_reward_override_and_metrics(monkeypatch: pytest.MonkeyPa
     assert info.get("final_action_idx") == 4
     assert info.get("game_success") is False
     assert "NOT_FINISHED" in str(info.get("game_state"))
-

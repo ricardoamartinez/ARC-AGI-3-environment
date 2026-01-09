@@ -18,13 +18,13 @@ except ModuleNotFoundError:  # pragma: no cover
 else:
     Manual = _Manual
 
-PPOAgent: type[Agent] | None
+JEPAAgent: type[Agent] | None
 try:  # pragma: no cover
-    from .ppo import PPOAgent as _PPOAgent
+    from .jepa import JEPAAgent as _JEPAAgent
 except ModuleNotFoundError:  # pragma: no cover
-    PPOAgent = None
+    JEPAAgent = None
 else:
-    PPOAgent = _PPOAgent
+    JEPAAgent = _JEPAAgent
 
 from .templates.random_agent import Random
 
@@ -44,7 +44,7 @@ __all__ = [
     "Swarm",
     "Random",
     "Manual",
-    "PPOAgent",
+    "JEPAAgent",
     "Agent",
     "Recorder",
     "Playback",

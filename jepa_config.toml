@@ -1,0 +1,99 @@
+# V-JEPA 2 RL Agent Configuration
+# Loaded automatically by `main.py` if present.
+# Env vars still override these values.
+
+[trainer]
+name = "rtac"                # online TD actor-critic update every step
+action_mode = "vel"
+require_goal = false
+random_goal = true
+
+[features]
+mode = "somatic"             # ultra-light; uses explicit cursor/goal coords
+dim = 64                     # small = faster per-step backprop
+disable_lstm = true          # feedforward (cheapest), reduces UI lag
+
+[logging]
+log_every = 50
+ui_fps = 60
+ui_grid_fps = 5
+
+[reward]
+# Dense continuing reward (no terminals). This is what the RTAC trainer learns from.
+mode = "dense"
+scale = 2.0
+goal_radius = 0.06
+arrival_bonus = 2.0
+action_l2_penalty = 0.001
+vel_l2_penalty = 0.12
+jerk_l2_penalty = 0.005
+wall_penalty = 0.02
+
+[physics]
+# Cursor movement physics
+bounds = 1.0
+max_speed = 32.0              # cursor can move 32 cells/step
+vel_response = 1.0
+inertia_alpha = 1.0           # instant response
+damping = 0.0
+pd_kp = 1.0
+pd_kd = 0.0
+stop_radius = 0.1
+stop_speed = 0.5
+speed_scale_max = 10.0
+target_ema_alpha = 1.0
+target_delta_max = 48.0
+
+[sac]
+lr = 1e-3
+gamma = 0.99
+tau = 0.005
+batch_size = 128
+buffer_size = 10000
+warmup = 200
+updates_per_step = 4
+auto_alpha = true
+target_entropy = -0.2
+features = "somatic"
+clear_buffer_on_goal_change = true
+goal_change_burst_updates = 500
+deterministic_after_steps = 500
+async_updates = true
+infer_device = "cpu"
+sync_every_updates = 50
+
+[rtac]
+lr = 3e-4
+gamma = 0.97
+td_lambda = 0.0
+value_coef = 0.5
+entropy_coef = 0.001
+adv_clip = 3.0
+max_grad_norm = 1.0
+device = "cuda"
+async_updates = true
+infer_device = "cpu"
+sync_every_updates = 25
+queue_size = 512
+torch_num_threads = 1
+
+[jepa]
+# V-JEPA 2 joint embedding learning
+enabled = true
+bias = 2.0                   # How much to bias toward effective actions
+train_every = 4              # Train JEPA every N steps
+warmup = 100                 # Steps before using JEPA predictions
+show_viz = true              # Show 3D PCA visualizer
+
+[world_model]
+# Legacy world model settings (used by world_model_trainer)
+latent_dim = 64
+planning_horizon = 3
+use_planner = true
+use_curiosity = true
+curiosity_scale = 0.1
+train_every = 64
+exploration_steps = 200
+buffer_size = 5000
+batch_size = 16
+lr = 1e-3

@@ -55,7 +55,7 @@ class SACActor(nn.Module):
         super().__init__()
         self.action_dim = action_dim
 
-        feat_mode = os.environ.get("PPO_SAC_FEATURES", "full").strip().lower()
+        feat_mode = os.environ.get("JEPA_SAC_FEATURES", "full").strip().lower()
         if feat_mode in ("somatic", "somatic_only", "coords"):
             self.features = SomaticFeatureExtractor(features_dim=features_dim)
         else:
@@ -126,7 +126,7 @@ class SACCritic(nn.Module):
         super().__init__()
         self.action_dim = action_dim
 
-        feat_mode = os.environ.get("PPO_SAC_FEATURES", "full").strip().lower()
+        feat_mode = os.environ.get("JEPA_SAC_FEATURES", "full").strip().lower()
         if feat_mode in ("somatic", "somatic_only", "coords"):
             self.features = SomaticFeatureExtractor(features_dim=features_dim)
         else:

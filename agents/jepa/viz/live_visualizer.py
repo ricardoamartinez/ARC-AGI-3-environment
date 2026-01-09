@@ -23,10 +23,10 @@ class LiveVisualizerCallback:
         # UI should never lag behind training: keep only the latest message (coalescing queue).
         self.msg_queue = queue.Queue(maxsize=1)
         self._last_send_ts = 0.0
-        self._ui_fps = float(os.environ.get("PPO_UI_FPS", "60"))
+        self._ui_fps = float(os.environ.get("JEPA_UI_FPS", "60"))
         self._ui_fps = max(1.0, min(240.0, self._ui_fps))
         # Sending full grids is expensive (huge JSON). Send grids at a lower FPS, and only when needed.
-        self._grid_fps = float(os.environ.get("PPO_UI_GRID_FPS", "5"))
+        self._grid_fps = float(os.environ.get("JEPA_UI_GRID_FPS", "5"))
         self._grid_fps = max(0.1, min(60.0, self._grid_fps))
         self._last_grid_send_ts = 0.0
         self._last_grids_obj_id = None

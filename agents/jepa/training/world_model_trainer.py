@@ -31,7 +31,7 @@ def run_world_model_training(agent) -> None:
     """
     logger.info("Starting World Model training for game %s", agent.game_id)
 
-    device = os.environ.get("PPO_RTAC_DEVICE", "cuda")
+    device = os.environ.get("JEPA_RTAC_DEVICE", "cuda")
     device = device if torch.cuda.is_available() else "cpu"
     logger.info("Using device: %s", device)
 
@@ -42,7 +42,7 @@ def run_world_model_training(agent) -> None:
     use_curiosity = os.environ.get("WM_USE_CURIOSITY", "1") == "1"
     curiosity_scale = float(os.environ.get("WM_CURIOSITY_SCALE", "0.1"))
     train_every = int(os.environ.get("WM_TRAIN_EVERY", "4"))
-    log_every = int(os.environ.get("PPO_LOG_EVERY", "50"))
+    log_every = int(os.environ.get("JEPA_LOG_EVERY", "50"))
     exploration_steps = int(os.environ.get("WM_EXPLORATION_STEPS", "1000"))
     buffer_size = int(os.environ.get("WM_BUFFER_SIZE", "50000"))
     batch_size = int(os.environ.get("WM_BATCH_SIZE", "64"))

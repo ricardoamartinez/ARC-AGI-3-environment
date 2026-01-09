@@ -100,36 +100,36 @@ def _pick_device(name: str) -> torch.device:
 
 def run_rtac_training(agent) -> None:
     """
-    Entry point used by PPOAgent.main() when PPO_TRAINER=rtac.
+    Entry point used by PPOAgent.main() when JEPA_TRAINER=rtac.
     """
     logger.info("Starting RTAC (online TD actor-critic) for game %s", agent.game_id)
 
-    device = _pick_device(os.environ.get("PPO_RTAC_DEVICE", "auto"))
+    device = _pick_device(os.environ.get("JEPA_RTAC_DEVICE", "auto"))
     logger.info("Using device: %s", device)
 
     # Force a stable control mode for this trainer.
-    if os.environ.get("PPO_ACTION_MODE", "").strip().lower() not in ("vel", "velocity", "cursor_vel"):
+    if os.environ.get("JEPA_ACTION_MODE", "").strip().lower() not in ("vel", "velocity", "cursor_vel"):
         logger.warning(
-            "RTAC trainer expects PPO_ACTION_MODE=vel. Current PPO_ACTION_MODE=%r. "
-            "Set [trainer].action_mode='vel' in ppo_config.toml.",
-            os.environ.get("PPO_ACTION_MODE"),
+            "RTAC trainer expects JEPA_ACTION_MODE=vel. Current JEPA_ACTION_MODE=%r. "
+            "Set [trainer].action_mode='vel' in JEPA_config.toml.",
+            os.environ.get("JEPA_ACTION_MODE"),
         )
 
     cfg = TrainCfg(
-        gamma=float(os.environ.get("PPO_GAMMA", "0.97")),
-        actor_lr=float(os.environ.get("PPO_ACTOR_LR", os.environ.get("PPO_LR", "3e-4"))),
-        critic_lr=float(os.environ.get("PPO_CRITIC_LR", "8e-4")),
-        entropy_coef=float(os.environ.get("PPO_ENTROPY_COEF", "1e-3")),
-        grad_clip_norm=float(os.environ.get("PPO_GRAD_CLIP_NORM", os.environ.get("PPO_MAX_GRAD_NORM", "5.0"))),
-        log_every=int(os.environ.get("PPO_LOG_EVERY", "50")),
-        warmup_steps=int(os.environ.get("PPO_WARMUP_STEPS", "0")),
+        gamma=float(os.environ.get("JEPA_GAMMA", "0.97")),
+        actor_lr=float(os.environ.get("JEPA_ACTOR_LR", os.environ.get("JEPA_LR", "3e-4"))),
+        critic_lr=float(os.environ.get("JEPA_CRITIC_LR", "8e-4")),
+        entropy_coef=float(os.environ.get("JEPA_ENTROPY_COEF", "1e-3")),
+        grad_clip_norm=float(os.environ.get("JEPA_GRAD_CLIP_NORM", os.environ.get("JEPA_MAX_GRAD_NORM", "5.0"))),
+        log_every=int(os.environ.get("JEPA_LOG_EVERY", "50")),
+        warmup_steps=int(os.environ.get("JEPA_WARMUP_STEPS", "0")),
     )
 
     env = ARCGymEnv(agent, max_steps=1_000_000)
     callback = LiveVisualizerCallback(agent.gui_process, agent)
     callback._quit_event = agent._quit_event
 
-    # Bootstrap server frame once (env.reset handles it based on PPO_DISABLE_RESET_BOOTSTRAP).
+    # Bootstrap server frame once (env.reset handles it based on JEPA_DISABLE_RESET_BOOTSTRAP).
     env.reset()
 
     obs_dim = int(env.vector_obs().shape[0])
@@ -151,14 +151,14 @@ def run_rtac_training(agent) -> None:
     agent.model = actor  # for saving/debug UI compatibility
 
     # === V-JEPA 2 Action Learning ===
-    use_action_jepa = os.environ.get("PPO_USE_ACTION_JEPA", "1") == "1"
-    action_jepa_bias = float(os.environ.get("PPO_JEPA_ACTION_BIAS", "2.0"))  # How much to bias toward effective actions
-    jepa_train_every = int(os.environ.get("PPO_JEPA_TRAIN_EVERY", "4"))
-    jepa_warmup = int(os.environ.get("PPO_JEPA_WARMUP", "100"))
+    use_action_jepa = os.environ.get("JEPA_USE_ACTION_JEPA", "1") == "1"
+    action_jepa_bias = float(os.environ.get("JEPA_JEPA_ACTION_BIAS", "2.0"))  # How much to bias toward effective actions
+    jepa_train_every = int(os.environ.get("JEPA_JEPA_TRAIN_EVERY", "4"))
+    jepa_warmup = int(os.environ.get("JEPA_JEPA_WARMUP", "100"))
     
     action_jepa: Optional[ActionJEPA] = None
     jepa_visualizer: Optional[JEPAVisualizer] = None
-    show_jepa_viz = os.environ.get("PPO_SHOW_JEPA_VIZ", "1") == "1"
+    show_jepa_viz = os.environ.get("JEPA_SHOW_JEPA_VIZ", "1") == "1"
     
     if use_action_jepa:
         action_jepa = ActionJEPA(

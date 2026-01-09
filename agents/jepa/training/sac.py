@@ -81,7 +81,7 @@ def run_sac_training(agent: "PPOAgent") -> None:
     Soft Actor-Critic (SAC) trainer for fast, stable continuous control.
 
     IMPORTANT: This trainer expects a continuous 2D action space. Use:
-      PPO_ACTION_MODE=target_pos
+      JEPA_ACTION_MODE=target_pos
     so the env accepts a Box(2,) action and maps it to a smooth cursor trajectory.
     """
 
@@ -91,13 +91,13 @@ def run_sac_training(agent: "PPOAgent") -> None:
     logger.info(f"Using device: {device}")
 
     # Make UI responsive: optional async updates (learner thread) + lightweight inference device.
-    async_updates = os.environ.get("PPO_SAC_ASYNC_UPDATES", "1") == "1"
-    infer_device = os.environ.get("PPO_SAC_INFER_DEVICE", "cpu").strip().lower()
+    async_updates = os.environ.get("JEPA_SAC_ASYNC_UPDATES", "1") == "1"
+    infer_device = os.environ.get("JEPA_SAC_INFER_DEVICE", "cpu").strip().lower()
     if infer_device not in ("cpu", "cuda"):
         infer_device = "cpu"
     if infer_device == "cuda" and not torch.cuda.is_available():
         infer_device = "cpu"
-    sync_every_updates = int(os.environ.get("PPO_SAC_SYNC_EVERY_UPDATES", "50"))
+    sync_every_updates = int(os.environ.get("JEPA_SAC_SYNC_EVERY_UPDATES", "50"))
     sync_every_updates = max(1, sync_every_updates)
 
     env = ARCGymEnv(agent, max_steps=1_000_000)
@@ -107,28 +107,28 @@ def run_sac_training(agent: "PPOAgent") -> None:
 
     if not (isinstance(env.action_space, spaces.Box) and env.action_space.shape is not None):
         raise RuntimeError(
-            "SAC requires PPO_ACTION_MODE=target_pos so env.action_space is a Box. "
+            "SAC requires JEPA_ACTION_MODE=target_pos so env.action_space is a Box. "
             f"Got action_mode={getattr(env, 'action_mode', None)} action_space={env.action_space}."
         )
     action_dim = int(env.action_space.shape[0])
 
     # Hyperparams
-    lr = float(os.environ.get("PPO_SAC_LR", os.environ.get("PPO_LR", "3e-4")))
-    gamma = float(os.environ.get("PPO_SAC_GAMMA", "0.99"))
-    tau = float(os.environ.get("PPO_SAC_TAU", "0.005"))
-    batch_size = int(os.environ.get("PPO_SAC_BATCH_SIZE", "256"))
+    lr = float(os.environ.get("JEPA_SAC_LR", os.environ.get("JEPA_LR", "3e-4")))
+    gamma = float(os.environ.get("JEPA_SAC_GAMMA", "0.99"))
+    tau = float(os.environ.get("JEPA_SAC_TAU", "0.005"))
+    batch_size = int(os.environ.get("JEPA_SAC_BATCH_SIZE", "256"))
     # Note: replay buffer stores full uint8 observations (64x64xC). Large values can consume huge RAM.
-    # Keep a conservative default; override via PPO_SAC_BUFFER_SIZE as needed.
-    buffer_size = int(os.environ.get("PPO_SAC_BUFFER_SIZE", "10000"))
-    warmup = int(os.environ.get("PPO_SAC_WARMUP", "2000"))
-    updates_per_step = int(os.environ.get("PPO_SAC_UPDATES_PER_STEP", "1"))
-    deterministic_actions = os.environ.get("PPO_DETERMINISTIC_ACTIONS", "0") == "1"
-    deterministic_after = int(os.environ.get("PPO_SAC_DETERMINISTIC_AFTER_STEPS", "0"))
+    # Keep a conservative default; override via JEPA_SAC_BUFFER_SIZE as needed.
+    buffer_size = int(os.environ.get("JEPA_SAC_BUFFER_SIZE", "10000"))
+    warmup = int(os.environ.get("JEPA_SAC_WARMUP", "2000"))
+    updates_per_step = int(os.environ.get("JEPA_SAC_UPDATES_PER_STEP", "1"))
+    deterministic_actions = os.environ.get("JEPA_DETERMINISTIC_ACTIONS", "0") == "1"
+    deterministic_after = int(os.environ.get("JEPA_SAC_DETERMINISTIC_AFTER_STEPS", "0"))
 
     # Entropy temperature
-    auto_alpha = os.environ.get("PPO_SAC_AUTO_ALPHA", "1") == "1"
-    target_entropy = float(os.environ.get("PPO_SAC_TARGET_ENTROPY", str(-2.0)))
-    init_alpha = float(os.environ.get("PPO_SAC_ALPHA", "0.2"))
+    auto_alpha = os.environ.get("JEPA_SAC_AUTO_ALPHA", "1") == "1"
+    target_entropy = float(os.environ.get("JEPA_SAC_TARGET_ENTROPY", str(-2.0)))
+    init_alpha = float(os.environ.get("JEPA_SAC_ALPHA", "0.2"))
 
     # Replay buffer stores uint8 HWC to save RAM
     obs0, _ = env.reset()
@@ -158,7 +158,7 @@ def run_sac_training(agent: "PPOAgent") -> None:
     callback = LiveVisualizerCallback(agent.gui_process, agent)
     callback._quit_event = agent._quit_event
 
-    log_every = int(os.environ.get("PPO_LOG_EVERY", "50"))
+    log_every = int(os.environ.get("JEPA_LOG_EVERY", "50"))
     logger.info(
         "SAC config: action_mode=%s lr=%s gamma=%s tau=%s batch=%s buf=%s warmup=%s upd/step=%s auto_alpha=%s target_entropy=%s",
         getattr(env, "action_mode", "unknown"),
@@ -176,12 +176,12 @@ def run_sac_training(agent: "PPOAgent") -> None:
     obs = obs0
     step_idx = 0
     ema_goal_dist: float | None = None
-    ema_beta = float(os.environ.get("PPO_GOAL_EMA_BETA", "0.98"))
-    hit_window = int(os.environ.get("PPO_GOAL_HIT_WINDOW", "500"))
+    ema_beta = float(os.environ.get("JEPA_GOAL_EMA_BETA", "0.98"))
+    hit_window = int(os.environ.get("JEPA_GOAL_HIT_WINDOW", "500"))
     recent_hits: list[int] = []
     last_goal_version: int | None = None
-    clear_on_goal_change = os.environ.get("PPO_SAC_CLEAR_BUFFER_ON_GOAL_CHANGE", "1") == "1"
-    goal_change_burst_updates = int(os.environ.get("PPO_SAC_GOAL_CHANGE_BURST_UPDATES", "200"))
+    clear_on_goal_change = os.environ.get("JEPA_SAC_CLEAR_BUFFER_ON_GOAL_CHANGE", "1") == "1"
+    goal_change_burst_updates = int(os.environ.get("JEPA_SAC_GOAL_CHANGE_BURST_UPDATES", "200"))
     burst_remaining = 0
     learner_updates = 0
 

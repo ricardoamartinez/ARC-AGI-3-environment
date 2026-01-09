@@ -20,31 +20,31 @@ class PhysicsEngine:
         # Smooth, inertial cursor dynamics (for non-jumpy trajectories).
         # Policy outputs are treated as desired velocity in [-1,1].
         # Increased defaults for more responsive cursor movement.
-        self.max_speed = float(os.environ.get("PPO_MAX_SPEED", "6.0"))  # cells/step - higher for faster movement
+        self.max_speed = float(os.environ.get("JEPA_MAX_SPEED", "6.0"))  # cells/step - higher for faster movement
         # Blend factor for reaching desired velocity (0..1). Higher = more responsive.
-        self.inertia_alpha = float(os.environ.get("PPO_INERTIA_ALPHA", "0.5"))
+        self.inertia_alpha = float(os.environ.get("JEPA_INERTIA_ALPHA", "0.5"))
         self.inertia_alpha = max(0.0, min(1.0, self.inertia_alpha))
         # Additional damping each step (0..1). Lower = less friction.
-        self.damping = float(os.environ.get("PPO_DAMPING", "0.02"))
+        self.damping = float(os.environ.get("JEPA_DAMPING", "0.02"))
         self.damping = max(0.0, min(1.0, self.damping))
 
         # Spring-damper (PD) control gains for target-position mode
         # Higher kp = faster acceleration toward target
-        self.kp = float(os.environ.get("PPO_PD_KP", "0.6"))
-        self.kd = float(os.environ.get("PPO_PD_KD", "0.2"))
+        self.kp = float(os.environ.get("JEPA_PD_KP", "0.6"))
+        self.kd = float(os.environ.get("JEPA_PD_KD", "0.2"))
         self.kp = max(0.0, self.kp)
         self.kd = max(0.0, self.kd)
 
         # Stop deadband to eliminate jitter: if we're close enough and already slow,
         # we "stick" and zero velocity (static friction).
         # Reduced stop_radius so cursor moves more freely
-        self.stop_radius = float(os.environ.get("PPO_STOP_RADIUS", "0.3"))  # cells
-        self.stop_speed = float(os.environ.get("PPO_STOP_SPEED", "0.1"))  # cells/step
+        self.stop_radius = float(os.environ.get("JEPA_STOP_RADIUS", "0.3"))  # cells
+        self.stop_speed = float(os.environ.get("JEPA_STOP_SPEED", "0.1"))  # cells/step
         self.stop_radius = max(0.0, self.stop_radius)
         self.stop_speed = max(0.0, self.stop_speed)
 
         # Allow speed_scale > 1.0 to move faster when far, while still allowing the agent to brake near the goal.
-        self.speed_scale_max = float(os.environ.get("PPO_SPEED_SCALE_MAX", "2.0"))
+        self.speed_scale_max = float(os.environ.get("JEPA_SPEED_SCALE_MAX", "2.0"))
         self.speed_scale_max = max(0.0, self.speed_scale_max)
 
     def reset(self):

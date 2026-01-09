@@ -163,7 +163,7 @@ class OnlineActorCritic(nn.Module):
     ):
         super().__init__()
 
-        feat_mode = os.environ.get("PPO_FEATURES", "full").strip().lower()
+        feat_mode = os.environ.get("JEPA_FEATURES", "full").strip().lower()
         if feat_mode in ("somatic", "somatic_only", "coords"):
             self.features_extractor = SomaticOnlyFeatureExtractor(features_dim=features_dim)
         else:
@@ -258,7 +258,7 @@ class OnlineActorCritic(nn.Module):
         features = self.features_extractor(obs)
 
         hx, cx = hidden_states
-        if os.environ.get("PPO_DISABLE_LSTM", "0") == "1":
+        if os.environ.get("JEPA_DISABLE_LSTM", "0") == "1":
             # Feedforward mode (much cheaper; good for low-lag UI). Keep shape compatible.
             next_hx, next_cx = features, cx.detach() * 0.0
         else:
@@ -266,14 +266,14 @@ class OnlineActorCritic(nn.Module):
 
         mean_continuous = self.actor_continuous(next_hx)
         # Mean clip prevents base Normal mean from exploding, which would make tanh(action) saturate.
-        mean_clip = float(os.environ.get("PPO_MEAN_CLIP", "3.0"))
+        mean_clip = float(os.environ.get("JEPA_MEAN_CLIP", "3.0"))
         if mean_clip > 0:
             mean_continuous = torch.clamp(mean_continuous, -mean_clip, mean_clip)
 
         # Prevent variance collapse (which can lock the policy into bad corner targets).
         # Default floor keeps some exploration while still allowing near-deterministic control.
-        log_std_min = float(os.environ.get("PPO_LOG_STD_MIN", "-2.0"))
-        log_std_max = float(os.environ.get("PPO_LOG_STD_MAX", "0.0"))
+        log_std_min = float(os.environ.get("JEPA_LOG_STD_MIN", "-2.0"))
+        log_std_max = float(os.environ.get("JEPA_LOG_STD_MAX", "0.0"))
         if log_std_min > log_std_max:
             log_std_min, log_std_max = log_std_max, log_std_min
         clamped_log_std = torch.clamp(self.log_std, log_std_min, log_std_max)

@@ -21,7 +21,7 @@ class ActionProcessor:
         # Minimal mapping: trigger > threshold enables the discrete action index
         # Default 0.5 so there's a 50% chance of action firing when trigger is random.
         # The policy learns to increase/decrease trigger based on rewards.
-        self.act_threshold = float(os.environ.get("PPO_TRIGGER_THRESHOLD", "0.5"))
+        self.act_threshold = float(os.environ.get("JEPA_TRIGGER_THRESHOLD", "0.5"))
 
     def reset(self):
         pass

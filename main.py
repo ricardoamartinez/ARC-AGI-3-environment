@@ -26,7 +26,7 @@ import requests
 
 from agents import AVAILABLE_AGENTS, Swarm
 from agents.tracing import initialize as init_agentops
-from agents.ppo.config import apply_ppo_config_if_present
+from agents.jepa.config import apply_jepa_config_if_present
 
 logger = logging.getLogger()
 
@@ -106,10 +106,7 @@ def main() -> None:
     logger.addHandler(file_handler)
     logger.addHandler(stdout_handler)
 
-    # logging.getLogger("requests").setLevel(logging.CRITICAL)
-    # logging.getLogger("werkzeug").setLevel(logging.CRITICAL)
-
-    parser = argparse.ArgumentParser(description="ARC-AGI-3-Agents")
+    parser = argparse.ArgumentParser(description="ARC-AGI-3 V-JEPA 2 RL Agents")
     parser.add_argument(
         "-a",
         "--agent",
@@ -131,7 +128,7 @@ def main() -> None:
     parser.add_argument(
         "--no-gui",
         action="store_true",
-        help="Run PPOAgent headless (no pygame UI). By default PPOAgent opens the UI.",
+        help="Run JEPAAgent headless (no pygame UI). By default JEPAAgent opens the UI.",
     )
 
     args = parser.parse_args()
@@ -140,26 +137,26 @@ def main() -> None:
         logger.error("An Agent must be specified")
         return
 
-    # Apply PPO config file (if present) after dotenv but before agent construction.
-    # This lets you keep all knobs in one file (`ppo_config.toml`) instead of many env vars.
-    applied_cfg = apply_ppo_config_if_present(override_env=False)
+    # Apply JEPA config file (if present) after dotenv but before agent construction.
+    # This lets you keep all knobs in one file (`jepa_config.toml`) instead of many env vars.
+    applied_cfg = apply_jepa_config_if_present(override_env=False)
     if applied_cfg:
-        logger.info("Applied ppo_config.toml: %s", applied_cfg)
+        logger.info("Applied jepa_config.toml: %s", applied_cfg)
 
-    # PPO UI/headless handling:
-    # Many users set PPO_NO_GUI/PPO_RANDOM_GOAL for headless tests and forget to unset it.
-    # We default to UI when running ppoagent unless --no-gui is explicitly passed.
-    if args.agent == "ppoagent":
+    # JEPA UI/headless handling:
+    # Many users set JEPA_NO_GUI/JEPA_RANDOM_GOAL for headless tests and forget to unset it.
+    # We default to UI when running jepaagent unless --no-gui is explicitly passed.
+    if args.agent == "jepaagent":
         if getattr(args, "no_gui", False):
-            os.environ["PPO_NO_GUI"] = "1"
-            logger.info("PPOAgent will run headless (--no-gui).")
+            os.environ["JEPA_NO_GUI"] = "1"
+            logger.info("JEPAAgent will run headless (--no-gui).")
         else:
-            if "PPO_NO_GUI" in os.environ:
-                os.environ.pop("PPO_NO_GUI", None)
+            if "JEPA_NO_GUI" in os.environ:
+                os.environ.pop("JEPA_NO_GUI", None)
             # Also clear headless-only goal envs so UI runs rely on clicking the goal.
-            os.environ.pop("PPO_RANDOM_GOAL", None)
-            os.environ.pop("PPO_FIXED_GOAL", None)
-            logger.info("PPOAgent will run with UI (default).")
+            os.environ.pop("JEPA_RANDOM_GOAL", None)
+            os.environ.pop("JEPA_FIXED_GOAL", None)
+            logger.info("JEPAAgent will run with UI (default).")
 
     print(f"{ROOT_URL}/api/games")
     print(f"Using API Key: {HEADERS['X-API-Key'][:8]}...{HEADERS['X-API-Key'][-4:]}")
@@ -204,11 +201,11 @@ def main() -> None:
         )
         full_games = args.game.split(",")
     
-    # INTERACTIVE SELECTION FOR PPO AGENT
-    if args.agent == "ppoagent" and not args.game:
-        from agents.ppo.agent import PPOAgent
-        logger.info("No game specified for PPOAgent. Launching interactive game selector...")
-        selected_id = PPOAgent.select_game_interactively(ROOT_URL, HEADERS)
+    # INTERACTIVE SELECTION FOR JEPA AGENT
+    if args.agent == "jepaagent" and not args.game:
+        from agents.jepa.agent import JEPAAgent
+        logger.info("No game specified for JEPAAgent. Launching interactive game selector...")
+        selected_id = JEPAAgent.select_game_interactively(ROOT_URL, HEADERS)
         if selected_id:
             logger.info(f"Selected game: {selected_id}")
             # Treat as if the user passed this game ID

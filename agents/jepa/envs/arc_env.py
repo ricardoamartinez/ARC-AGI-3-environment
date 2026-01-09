@@ -39,62 +39,62 @@ class ARCGymEnv(gym.Env):
         # Default depends on trainer:
         # - SAC requires target_pos (continuous 2D Box)
         # - RTAC legacy defaults to delta
-        if "PPO_ACTION_MODE" in os.environ:
-            self.action_mode = os.environ.get("PPO_ACTION_MODE", "delta").strip().lower()
+        if "JEPA_ACTION_MODE" in os.environ:
+            self.action_mode = os.environ.get("JEPA_ACTION_MODE", "delta").strip().lower()
         else:
-            trainer = os.environ.get("PPO_TRAINER", "sac").strip().lower()
+            trainer = os.environ.get("JEPA_TRAINER", "sac").strip().lower()
             self.action_mode = "target_pos" if trainer == "sac" else "delta"
 
         # === CursorGoalEnv-style world dynamics (reference implementation) ===
         # World is a square [-bounds, bounds]^2; default bounds=1.0.
-        self.world_bounds = float(os.environ.get("PPO_BOUNDS", "1.0"))
+        self.world_bounds = float(os.environ.get("JEPA_BOUNDS", "1.0"))
         self.world_bounds = max(1e-6, self.world_bounds)
 
         # In vel-mode, action is a velocity *command* in [-1,1]; it is scaled by max_speed (world units).
         # Reference default max_speed=0.06.
-        self.vel_max_speed = float(os.environ.get("PPO_MAX_SPEED", "0.06"))
+        self.vel_max_speed = float(os.environ.get("JEPA_MAX_SPEED", "0.06"))
         self.vel_max_speed = max(0.0, self.vel_max_speed)
 
         # Optional response smoothing (reference has vel_response parameter):
         # vel <- (1-alpha)*vel + alpha*(action*max_speed)
         # alpha=1.0 means no smoothing (instant response).
-        self.vel_response = float(os.environ.get("PPO_VEL_RESPONSE", "1.0"))
+        self.vel_response = float(os.environ.get("JEPA_VEL_RESPONSE", "1.0"))
         self.vel_response = float(np.clip(self.vel_response, 0.0, 1.0))
 
         # Reward mode:
         # - "progress": (prev_dist - dist)*reward_scale - action_l2_penalty*||a||^2 (+goal_bonus on reach)
         # - "dense":   -dist^2*reward_scale - action_penalty - vel_penalty - jerk_penalty (+arrival_bonus on entry)
-        self.reward_mode = os.environ.get("PPO_REWARD_MODE", "dense").strip().lower()
+        self.reward_mode = os.environ.get("JEPA_REWARD_MODE", "dense").strip().lower()
 
         # Sparse reward mode (game solving): ignore all shaping and only reward on WIN.
         # This is intentionally off by default; cursor-to-goal trainers rely on dense shaping.
-        self.sparse_reward_enabled = os.environ.get("PPO_SPARSE_REWARD", "0") == "1"
-        self.success_bonus = float(os.environ.get("PPO_SUCCESS_BONUS", "1.0"))
+        self.sparse_reward_enabled = os.environ.get("JEPA_SPARSE_REWARD", "0") == "1"
+        self.success_bonus = float(os.environ.get("JEPA_SUCCESS_BONUS", "1.0"))
         self.success_bonus = max(0.0, self.success_bonus)
 
-        self.reward_scale = float(os.environ.get("PPO_REWARD_SCALE", "2.0"))
+        self.reward_scale = float(os.environ.get("JEPA_REWARD_SCALE", "2.0"))
         self.reward_scale = max(0.0, self.reward_scale)
-        self.action_l2_penalty = float(os.environ.get("PPO_ACTION_L2_PENALTY", "0.001"))
+        self.action_l2_penalty = float(os.environ.get("JEPA_ACTION_L2_PENALTY", "0.001"))
         self.action_l2_penalty = max(0.0, self.action_l2_penalty)
 
         # Dense-mode penalties (reference defaults)
-        self.vel_l2_penalty = float(os.environ.get("PPO_VEL_L2_PENALTY", "0.08"))
+        self.vel_l2_penalty = float(os.environ.get("JEPA_VEL_L2_PENALTY", "0.08"))
         self.vel_l2_penalty = max(0.0, self.vel_l2_penalty)
-        self.jerk_l2_penalty = float(os.environ.get("PPO_JERK_L2_PENALTY", "0.001"))
+        self.jerk_l2_penalty = float(os.environ.get("JEPA_JERK_L2_PENALTY", "0.001"))
         self.jerk_l2_penalty = max(0.0, self.jerk_l2_penalty)
-        self.arrival_bonus = float(os.environ.get("PPO_ARRIVAL_BONUS", "2.0"))
+        self.arrival_bonus = float(os.environ.get("JEPA_ARRIVAL_BONUS", "2.0"))
         self.arrival_bonus = max(0.0, self.arrival_bonus)
 
         # Progress-mode extras
-        self.goal_bonus = float(os.environ.get("PPO_GOAL_BONUS", "1.0"))
+        self.goal_bonus = float(os.environ.get("JEPA_GOAL_BONUS", "1.0"))
         self.goal_bonus = max(0.0, self.goal_bonus)
-        self.goal_change_interval = int(os.environ.get("PPO_GOAL_CHANGE_INTERVAL", "0"))
+        self.goal_change_interval = int(os.environ.get("JEPA_GOAL_CHANGE_INTERVAL", "0"))
         self.goal_change_interval = max(0, self.goal_change_interval)
 
         # Goal semantics
-        self.goal_radius = float(os.environ.get("PPO_GOAL_RADIUS", "0.06"))  # world units
+        self.goal_radius = float(os.environ.get("JEPA_GOAL_RADIUS", "0.06"))  # world units
         self.goal_radius = max(0.0, self.goal_radius)
-        self.auto_new_goal_on_reach = os.environ.get("PPO_AUTO_NEW_GOAL_ON_REACH", "0") == "1"
+        self.auto_new_goal_on_reach = os.environ.get("JEPA_AUTO_NEW_GOAL_ON_REACH", "0") == "1"
 
         # World state for vel-mode
         self._w_pos = np.zeros((2,), dtype=np.float32)
@@ -104,23 +104,23 @@ class ARCGymEnv(gym.Env):
         self._vel_steps = 0
 
         # Energy / force penalty (encourages stopping and smooth control)
-        self.energy_penalty_enabled = os.environ.get("PPO_ENERGY_PENALTY", "0") == "1"
-        self.energy_penalty_coef = float(os.environ.get("PPO_ENERGY_COEF", "0.02"))
-        self.energy_penalty_mode = os.environ.get("PPO_ENERGY_PENALTY_MODE", "near_goal").strip().lower()
-        self.energy_near_goal_radius = float(os.environ.get("PPO_ENERGY_NEAR_GOAL_RADIUS", "6.0"))
+        self.energy_penalty_enabled = os.environ.get("JEPA_ENERGY_PENALTY", "0") == "1"
+        self.energy_penalty_coef = float(os.environ.get("JEPA_ENERGY_COEF", "0.02"))
+        self.energy_penalty_mode = os.environ.get("JEPA_ENERGY_PENALTY_MODE", "near_goal").strip().lower()
+        self.energy_near_goal_radius = float(os.environ.get("JEPA_ENERGY_NEAR_GOAL_RADIUS", "6.0"))
         self.energy_near_goal_radius = max(1e-6, self.energy_near_goal_radius)
 
         # If false, we never send API game actions; we only learn cursor navigation + goal reaching.
         # This avoids resets and prevents GAME_NOT_STARTED / GAME_OVER issues from crashing training.
         # Default ON so actions actually execute in-game.
-        self.allow_game_actions = os.environ.get("PPO_ALLOW_GAME_ACTIONS", "1") == "1"
+        self.allow_game_actions = os.environ.get("JEPA_ALLOW_GAME_ACTIONS", "1") == "1"
         # Bootstrapping: server may require RESET once to get the first frame. Disable only if you
         # guarantee frames already exist (otherwise training can't start).
-        self.disable_reset_bootstrap = os.environ.get("PPO_DISABLE_RESET_BOOTSTRAP", "0") == "1"
+        self.disable_reset_bootstrap = os.environ.get("JEPA_DISABLE_RESET_BOOTSTRAP", "0") == "1"
 
         # Target command smoothing (reduces jitter from action noise / exploration).
         # Higher alpha = more responsive to new targets (less smoothing)
-        self.target_ema_alpha = float(os.environ.get("PPO_TARGET_EMA_ALPHA", "0.6"))
+        self.target_ema_alpha = float(os.environ.get("JEPA_TARGET_EMA_ALPHA", "0.6"))
         self.target_ema_alpha = max(0.0, min(1.0, self.target_ema_alpha))
         self._ema_tx: float | None = None
         self._ema_ty: float | None = None
@@ -130,21 +130,21 @@ class ARCGymEnv(gym.Env):
         # Absolute targets map [-1,1] directly to [0..63], which makes early exploration look like
         # "teleport to corners" and can cause the policy to get stuck on walls.
         # For online TD learning (RTAC), a *relative* target (local delta) is much more stable.
-        trainer = os.environ.get("PPO_TRAINER", "sac").strip().lower()
-        if "PPO_TARGET_RELATIVE" in os.environ:
-            self.target_pos_relative = os.environ.get("PPO_TARGET_RELATIVE", "0") == "1"
+        trainer = os.environ.get("JEPA_TRAINER", "sac").strip().lower()
+        if "JEPA_TARGET_RELATIVE" in os.environ:
+            self.target_pos_relative = os.environ.get("JEPA_TARGET_RELATIVE", "0") == "1"
         else:
             # Default: RTAC (and other non-SAC trainers) use relative targets.
             self.target_pos_relative = trainer != "sac"
-        self.target_delta_max = float(os.environ.get("PPO_TARGET_DELTA_MAX", "16.0"))  # Increased for faster cursor
+        self.target_delta_max = float(os.environ.get("JEPA_TARGET_DELTA_MAX", "16.0"))  # Increased for faster cursor
         self.target_delta_max = max(0.0, min(float(self.grid_size - 1), self.target_delta_max))
 
         # Mild penalty for hitting walls (helps prevent edge/corner stickiness).
-        self.wall_penalty = float(os.environ.get("PPO_WALL_PENALTY", "0.02"))
+        self.wall_penalty = float(os.environ.get("JEPA_WALL_PENALTY", "0.02"))
         self.wall_penalty = max(0.0, self.wall_penalty)
         
         # Penalty for game actions that have no effect (encourages learning valid actions)
-        self.ineffective_action_penalty = float(os.environ.get("PPO_INEFFECTIVE_ACTION_PENALTY", "0.5"))
+        self.ineffective_action_penalty = float(os.environ.get("JEPA_INEFFECTIVE_ACTION_PENALTY", "0.5"))
         self.ineffective_action_penalty = max(0.0, self.ineffective_action_penalty)
         
         # Components (delta-mode only)
@@ -217,7 +217,7 @@ class ARCGymEnv(gym.Env):
                 # Provide something for the manual UI to render even without any server frames.
                 self.agent._latest_grid_for_ui = [blank.tolist()]
                 obs = self._get_obs(blank, None)
-                logger.info("DEBUG: Env Reset Done (blank bootstrap; PPO_DISABLE_RESET_BOOTSTRAP=1)")
+                logger.info("DEBUG: Env Reset Done (blank bootstrap; JEPA_DISABLE_RESET_BOOTSTRAP=1)")
                 return obs, {}
         else:
             # Bootstrap the very first frame. Server may require RESET to start a play session.
@@ -294,7 +294,7 @@ class ARCGymEnv(gym.Env):
                 curr_speed
             )
 
-            require_goal = os.environ.get("PPO_REQUIRE_GOAL", "1") == "1"
+            require_goal = os.environ.get("JEPA_REQUIRE_GOAL", "1") == "1"
             if goal is None and require_goal:
                 # Idle; do not integrate dynamics.
                 self._w_vel[...] = 0.0
@@ -374,7 +374,7 @@ class ARCGymEnv(gym.Env):
 
             # Intrinsic UX/safety fix: when no goal is set, don't let a stochastic policy
             # wander into corners. Idle in-place until the user sets a goal.
-            require_goal = os.environ.get("PPO_REQUIRE_GOAL", "1") == "1"
+            require_goal = os.environ.get("JEPA_REQUIRE_GOAL", "1") == "1"
             if goal is None and require_goal:
                 # Hard stop (no drift), and hold target at current position.
                 self.physics.reset()
@@ -405,8 +405,8 @@ class ARCGymEnv(gym.Env):
                 tx = float(np.clip(tx, 0.0, float(self.grid_size - 1)))
                 ty = float(np.clip(ty, 0.0, float(self.grid_size - 1)))
 
-                # Map [-1,1] -> [0, PPO_SPEED_SCALE_MAX]. Values >1 allow fast travel when far.
-                speed_scale_max = float(os.environ.get("PPO_SPEED_SCALE_MAX", "2.0"))
+                # Map [-1,1] -> [0, JEPA_SPEED_SCALE_MAX]. Values >1 allow fast travel when far.
+                speed_scale_max = float(os.environ.get("JEPA_SPEED_SCALE_MAX", "2.0"))
                 speed_scale_max = max(0.0, speed_scale_max)
                 speed_scale = float(np.clip((sraw + 1.0) * 0.5 * speed_scale_max, 0.0, speed_scale_max))
 
@@ -544,7 +544,7 @@ class ARCGymEnv(gym.Env):
                 # Goal shaping modes (for headless convergence testing).
                 # - potential: dense potential only (smooth/low-variance)
                 # - potential_progress: potential + clipped progress + hit bonus (default)
-                shaping_mode = os.environ.get("PPO_GOAL_SHAPING_MODE", "potential_progress").strip().lower()
+                shaping_mode = os.environ.get("JEPA_GOAL_SHAPING_MODE", "potential_progress").strip().lower()
                 max_dist = float(self.grid_size * 1.41421356237)
                 reward += -goal_dist / max_dist
                 if shaping_mode != "potential":
