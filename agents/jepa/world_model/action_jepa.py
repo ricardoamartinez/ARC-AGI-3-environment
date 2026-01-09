@@ -1,16 +1,16 @@
 """
-V-JEPA 2 Inspired Joint Embedding for Visual-Action Learning.
+V-JEPA 2 Inspired Joint Embedding for Visual-Action Learning (Online RL).
 
-Key ideas from V-JEPA 2:
-1. Learn representations in joint embedding space (no pixel reconstruction)
-2. Predict in latent space, not pixel space
+Key ideas adapted from V-JEPA 2 for online RL:
+1. Learn representations in joint embedding space
+2. Predict in latent space using L1 loss (per V-JEPA 2 paper)
 3. Use EMA target encoder for stable targets
-4. Contrastive alignment between visual states and action outcomes
+4. All components train together online (no separate pretraining phase)
 
 This module learns:
 - Which actions will have effects in the current visual state
 - Visual-action coordination for mouse and keyboard
-- Fast adaptation to avoid penalized (ineffective) actions
+- Fast online adaptation to avoid penalized (ineffective) actions
 """
 
 import math
@@ -191,7 +191,7 @@ class ActionJEPA(nn.Module):
         self.ema_decay = ema_decay
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         
-        # Visual encoder (online)
+        # Visual encoder (online) with 3D-RoPE per V-JEPA 2 paper
         self.visual_encoder = GridEncoder(
             grid_size=grid_size,
             patch_size=patch_size,
@@ -199,6 +199,7 @@ class ActionJEPA(nn.Module):
             embed_dim=embed_dim,
             depth=encoder_depth,
             num_heads=encoder_heads,
+            use_rope=True,  # V-JEPA 2 style 3D-RoPE
         ).to(self.device)
         
         # Visual encoder (EMA target - not trained directly)
@@ -209,6 +210,7 @@ class ActionJEPA(nn.Module):
             embed_dim=embed_dim,
             depth=encoder_depth,
             num_heads=encoder_heads,
+            use_rope=True,
         ).to(self.device)
         # Initialize target as copy of online
         self.target_encoder.load_state_dict(self.visual_encoder.state_dict())
@@ -390,13 +392,13 @@ class ActionJEPA(nn.Module):
             all_action_logits, all_action_targets
         )
         
-        # Loss 3: Latent prediction (cosine similarity with EMA target)
+        # Loss 3: Latent prediction (L1 loss with EMA target - per V-JEPA 2 paper)
+        # The paper explicitly uses L1 loss for all representation predictions
         # Only for actions that had effect (those that changed state)
         mask = had_effect.squeeze(1) > 0.5
         if mask.sum() > 0:
-            pred_norm = F.normalize(pred_next_emb[mask], dim=-1)
-            target_norm = F.normalize(target_next_emb[mask], dim=-1)
-            latent_loss = (1 - (pred_norm * target_norm).sum(dim=-1)).mean()
+            # V-JEPA 2 uses L1 loss: ||pred - target||_1
+            latent_loss = F.l1_loss(pred_next_emb[mask], target_next_emb[mask])
         else:
             latent_loss = torch.tensor(0.0, device=self.device)
         

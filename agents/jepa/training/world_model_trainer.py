@@ -50,7 +50,6 @@ def run_world_model_training(agent) -> None:
     mask_ratio = float(os.environ.get("WM_MASK_RATIO", "0.0"))
     mask_ratio = float(np.clip(mask_ratio, 0.0, 0.99))
     mask_loss_coef = float(os.environ.get("WM_MASK_COEF", "1.0"))
-    freeze_encoder_after = int(os.environ.get("WM_FREEZE_ENCODER_AFTER", "0"))
     variance_coef = float(os.environ.get("WM_VAR_COEF", "0.0"))
     variance_target = float(os.environ.get("WM_VAR_TARGET", "1.0"))
     # Exploration: in delta-mode, discrete actions only execute when trigger > threshold.
@@ -89,7 +88,14 @@ def run_world_model_training(agent) -> None:
         wm_cont_dim = int(env.action_space.shape[0])
         wm_num_discrete = 1
 
-    # Initialize world model
+    # Rollout loss settings (V-JEPA 2 style)
+    rollout_steps = int(os.environ.get("WM_ROLLOUT_STEPS", "2"))
+    rollout_loss_coef = float(os.environ.get("WM_ROLLOUT_COEF", "1.0"))
+    use_patch_tokens = os.environ.get("WM_USE_PATCH_TOKENS", "1") == "1"
+    predictor_layers = int(os.environ.get("WM_PREDICTOR_LAYERS", "6"))
+    predictor_heads = int(os.environ.get("WM_PREDICTOR_HEADS", "8"))
+
+    # Initialize world model with V-JEPA 2 style architecture
     world_model = WorldModel(
         grid_size=env.grid_size,
         latent_dim=latent_dim,
@@ -103,9 +109,14 @@ def run_world_model_training(agent) -> None:
         batch_size=batch_size,
         mask_ratio=mask_ratio,
         mask_loss_coef=mask_loss_coef,
-        freeze_encoder_after=freeze_encoder_after,
         variance_coef=variance_coef,
         variance_target=variance_target,
+        # V-JEPA 2 style settings
+        rollout_steps=rollout_steps,
+        rollout_loss_coef=rollout_loss_coef,
+        use_patch_tokens=use_patch_tokens,
+        predictor_layers=predictor_layers,
+        predictor_heads=predictor_heads,
     )
 
     # Curiosity module for exploration

@@ -177,11 +177,17 @@ def apply_jepa_config(
         "world_model.lr": "WM_LR",
         "world_model.mask_ratio": "WM_MASK_RATIO",
         "world_model.mask_coef": "WM_MASK_COEF",
-        "world_model.freeze_encoder_after": "WM_FREEZE_ENCODER_AFTER",
         "world_model.variance_coef": "WM_VAR_COEF",
         "world_model.variance_target": "WM_VAR_TARGET",
         "world_model.mark_cursor": "WM_MARK_CURSOR",
         "world_model.cursor_token": "WM_CURSOR_TOKEN",
+        
+        # V-JEPA 2 style settings
+        "world_model.rollout_steps": "WM_ROLLOUT_STEPS",
+        "world_model.rollout_coef": "WM_ROLLOUT_COEF",
+        "world_model.use_patch_tokens": "WM_USE_PATCH_TOKENS",
+        "world_model.predictor_layers": "WM_PREDICTOR_LAYERS",
+        "world_model.predictor_heads": "WM_PREDICTOR_HEADS",
     }
 
     applied: dict[str, str] = {}
