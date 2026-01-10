@@ -1,8 +1,12 @@
+"""UI State management for JEPA Agent visualization."""
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 
+
 @dataclass
-class GameState:
+class UIState:
+    """State container for the JEPA UI."""
+    
     # Game Data
     game_id: str = "Waiting..."
     score: int = 0
@@ -60,7 +64,17 @@ class GameState:
     
     # Keyboard Visuals
     key_activations: Dict[str, int] = field(default_factory=dict)
-    key_penalized: Dict[str, bool] = field(default_factory=dict)  # Track if last activation was penalized
+    key_penalized: Dict[str, bool] = field(default_factory=dict)
 
     running: bool = True
+    
+    # Imagination Mode - play inside the world model
+    imagination_mode: bool = False
+    imagination_grid: Optional[List[List[int]]] = None
+    imagination_reward: float = 0.0
+    imagination_win_prob: float = 0.0
+    imagination_step_count: int = 0
 
+
+# Alias for backwards compatibility
+GameState = UIState

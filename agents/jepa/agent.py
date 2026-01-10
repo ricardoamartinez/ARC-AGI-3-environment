@@ -6,7 +6,7 @@ import sys
 import os
 import random
 import threading
-from typing import Any, Optional, Set, List, Tuple
+from typing import Any, Optional, Set, List, Tuple, Dict
 
 import numpy as np
 
@@ -116,13 +116,22 @@ class JEPAAgent(Agent):
             
         try:
             logger.info("Launching Game Selection GUI...")
+            # Spawn subprocess with console for pygame to work
+            import platform
+            popen_kwargs = {
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": sys.stderr,
+                "text": True,
+                "bufsize": 1,
+            }
+            if platform.system() == "Windows":
+                # CREATE_NEW_CONSOLE is required for pygame to show windows
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+            
             proc = subprocess.Popen(
-                [sys.executable, "-m", "agents.manual"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=sys.stderr,
-                text=True,
-                bufsize=1
+                [sys.executable, "-m", "agents.jepa.ui"],
+                **popen_kwargs,
             )
             
             msg = {"action": "SHOW_GAME_SELECTOR", "games": games_with_thumbnails}
@@ -176,6 +185,14 @@ class JEPAAgent(Agent):
         self.manual_dopamine = 0.0
         self.manual_pain = 0.0
         self.spatial_goal: Optional[Tuple[int, int]] = None
+        
+        # Imagination mode - play inside the world model's predictions
+        self.imagination_mode: bool = False
+        self.imagination_action: Optional[Dict[str, Any]] = None  # Pending imagination action
+        self.imagination_grid: Optional[List[List[int]]] = None
+        self.imagination_reward: float = 0.0
+        self.imagination_win_prob: float = 0.0
+        self.imagination_step_count: int = 0
         # Incremented whenever the goal changes so the trainer can reset traces/LSTM cleanly.
         self.goal_version: int = 0
         # Goal shaping is a debug/training aid for cursor navigation.
@@ -218,15 +235,24 @@ class JEPAAgent(Agent):
 
     def _start_gui(self):
         try:
-            print(f"DEBUG: Launching Pygame GUI module agents.manual")
+            print(f"DEBUG: Launching Pygame GUI module agents.jepa.ui")
+            
+            # Spawn subprocess with console for pygame to work
+            import platform
+            popen_kwargs = {
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": sys.stderr,
+                "text": True,
+                "bufsize": 1,
+            }
+            if platform.system() == "Windows":
+                # CREATE_NEW_CONSOLE is required for pygame to show windows
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
             
             self.gui_process = subprocess.Popen(
-                [sys.executable, "-m", "agents.manual"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=sys.stderr,
-                text=True,
-                bufsize=1
+                [sys.executable, "-m", "agents.jepa.ui"],
+                **popen_kwargs,
             )
             
             def read_gui_output():
@@ -274,6 +300,27 @@ class JEPAAgent(Agent):
                                 elif data.get("action") == "TOGGLE_GOAL_SHAPING":
                                     self.goal_shaping_enabled = not self.goal_shaping_enabled
                                     logger.info(f"Goal shaping enabled: {self.goal_shaping_enabled}")
+                                # Handle imagination mode actions
+                                elif data.get("action") == "ENTER_IMAGINATION":
+                                    self.imagination_mode = True
+                                    self.imagination_step_count = 0
+                                    self.imagination_action = None
+                                    logger.info("Entered imagination mode")
+                                elif data.get("action") == "EXIT_IMAGINATION":
+                                    self.imagination_mode = False
+                                    self.imagination_grid = None
+                                    self.imagination_action = None
+                                    logger.info("Exited imagination mode")
+                                elif data.get("action") == "IMAGINE_ACTION":
+                                    # Store the imagination action for the trainer to process
+                                    dx = float(data.get("dx", 0.0))
+                                    dy = float(data.get("dy", 0.0))
+                                    disc = int(data.get("disc", 0))
+                                    self.imagination_action = {
+                                        "cont_action": [dx, dy],
+                                        "disc_action": disc,
+                                    }
+                                    logger.debug(f"Imagination action: dx={dx}, dy={dy}, disc={disc}")
                                 # Handle game actions from user (keyboard input)
                                 elif data.get("action") in ("ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5", "ACTION6", "ACTION7", "RESET"):
                                     action_name = data.get("action")

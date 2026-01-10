@@ -1,15 +1,19 @@
+"""Network communication for JEPA UI subprocess."""
 import sys
 import json
 import threading
 import queue
-from typing import Dict, Any, Optional
+from typing import Dict, Any
+
 
 class NetworkHandler:
+    """Handles stdin/stdout communication with parent process."""
+    
     def __init__(self):
-        # Keep only the latest message so the UI never lags behind trying to process a backlog.
-        # This also prevents pipe backpressure from slowing down the training process.
+        # Keep only the latest message to prevent UI lag
         self.input_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=1)
         self.running = True
+        self.parent_alive = True  # Track if parent process is still connected
         self._start_reader()
 
     def _start_reader(self):
@@ -21,6 +25,8 @@ class NetworkHandler:
             try:
                 line = sys.stdin.readline()
                 if not line:
+                    # Parent process closed stdin - keep UI alive but stop reading
+                    self.parent_alive = False
                     break
                 try:
                     data = json.loads(line)
@@ -34,7 +40,9 @@ class NetworkHandler:
                     self.input_queue.put_nowait(data)
                 except queue.Full:
                     pass
-            except ValueError:
+            except (ValueError, OSError, IOError):
+                # Pipe broken - parent process likely crashed
+                self.parent_alive = False
                 break
 
     def send_action(self, action_name: str, **kwargs):
@@ -44,10 +52,9 @@ class NetworkHandler:
             sys.stdout.write(json.dumps(msg) + "\n")
             sys.stdout.flush()
         except IOError:
-            pass # Handle broken pipe or closed stdout
+            pass
 
     def get_messages(self) -> list:
-        # Drain and return the latest message (at most 1 due to queue maxsize=1)
         messages: list[Dict[str, Any]] = []
         while not self.input_queue.empty():
             messages.append(self.input_queue.get())
@@ -55,4 +62,3 @@ class NetworkHandler:
 
     def stop(self):
         self.running = False
-

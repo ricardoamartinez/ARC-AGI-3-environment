@@ -3,7 +3,7 @@
 # Env vars still override these values.
 
 [trainer]
-name = "rtac"                # online TD actor-critic update every step
+name = "world_model"         # V-JEPA 2 world model with reward predictor for penalty avoidance
 action_mode = "vel"
 require_goal = false
 random_goal = true
@@ -86,14 +86,18 @@ warmup = 100                 # Steps before using JEPA predictions
 show_viz = true              # Show 3D PCA visualizer
 
 [world_model]
-# Legacy world model settings (used by world_model_trainer)
+# V-JEPA 2 World Model - FAST + ACCURATE
 latent_dim = 64
-planning_horizon = 3
+planning_horizon = 5
 use_planner = true
 use_curiosity = true
 curiosity_scale = 0.1
-train_every = 64
-exploration_steps = 200
-buffer_size = 5000
-batch_size = 16
-lr = 1e-3
+train_every = 4                # Frequent training
+exploration_steps = 50
+buffer_size = 5000             # Smaller buffer = faster sampling
+batch_size = 16                # Smaller batch = faster iterations
+lr = 3e-3
+rollout_steps = 4              # 4-step rollout (first + final supervised)
+rollout_coef = 2.0
+predictor_layers = 4           # Balance speed vs capacity
+predictor_heads = 4

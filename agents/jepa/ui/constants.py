@@ -1,7 +1,7 @@
+"""UI Constants for JEPA Agent visualization."""
 import pygame
 
-# Initialize pygame fonts safely (will need to be called after pygame.init)
-# We will define font configurations here, but actual font objects need initialization
+# Font configurations (actual font objects created after pygame.init)
 FONT_CONFIG = {
     "normal": ("Arial", 16),
     "title": ("Arial", 20, True),
@@ -17,8 +17,8 @@ GRID_WIDTH_DEFAULT = 800
 WINDOW_WIDTH_DEFAULT = GRID_WIDTH_DEFAULT + SIDEBAR_WIDTH
 
 # Animation
-ANIMATION_SPEED = 100 # ms per frame
-CLICK_VIS_DURATION = 500 # ms
+ANIMATION_SPEED = 100  # ms per frame
+CLICK_VIS_DURATION = 500  # ms
 KEY_FADE_DURATION = 300
 
 # Colors
@@ -28,24 +28,7 @@ SIDEBAR_BG = (0, 0, 0)
 BORDER_COLOR = (50, 50, 50)
 GRID_LINE_COLOR = (30, 30, 30)
 
-# ARC Palette (Original)
-# BASE_PALETTE = {
-#     0: (0, 0, 0),       # Black
-#     1: (30, 144, 255),  # Blue
-#     2: (255, 69, 0),    # Red
-#     3: (50, 205, 50),   # Green
-#     4: (255, 215, 0),   # Yellow
-#     5: (169, 169, 169), # Gray
-#     6: (255, 20, 147),  # Fuchsia
-#     7: (255, 140, 0),   # Orange
-#     8: (0, 255, 255),   # Cyan
-#     9: (128, 0, 128),   # Maroon
-#     10: (255, 255, 255), # White
-#     11: (105, 105, 105), # Gray
-#     12: (255, 255, 255), # Player
-# }
-
-# New Palette from Reasoning Agent
+# ARC Palette
 BASE_PALETTE = {
     0: (255, 255, 255),  # #FFFFFF
     1: (204, 204, 204),  # #CCCCCC
@@ -77,19 +60,19 @@ ACTION_NAMES = {
 }
 
 HEATMAP_COLORS = {
-    "attention": (255, 100, 0),   # Orange/Red
-    "pain": (255, 0, 0),          # Pure Red
-    "visit": (0, 255, 255),       # Cyan
-    "value": (0, 255, 0),         # Green
-    "controllability": (0, 255, 120),  # Green-ish
-    "surprise": (255, 180, 0),         # Orange
-    "disagreement": (255, 0, 255),     # Magenta
-    "obs_delta": (255, 255, 0),   # Yellow
-    "obs_focus": (255, 0, 255),   # Magenta
-    "obs_goal": (0, 100, 255),    # Blue
-    "obs_vel_x": (150, 150, 255), # Light Blue
-    "obs_vel_y": (150, 150, 255), # Light Blue
-    "obs_pain": (200, 0, 0)       # Dark Red
+    "attention": (255, 100, 0),
+    "pain": (255, 0, 0),
+    "visit": (0, 255, 255),
+    "value": (0, 255, 0),
+    "controllability": (0, 255, 120),
+    "surprise": (255, 180, 0),
+    "disagreement": (255, 0, 255),
+    "obs_delta": (255, 255, 0),
+    "obs_focus": (255, 0, 255),
+    "obs_goal": (0, 100, 255),
+    "obs_vel_x": (150, 150, 255),
+    "obs_vel_y": (150, 150, 255),
+    "obs_pain": (200, 0, 0)
 }
 
 HEATMAP_MODES = [

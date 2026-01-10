@@ -126,6 +126,15 @@ class LiveVisualizerCallback:
                 "energy_penalty_coef": energy_penalty_coef,
             },
         }
+        
+        # Include imagination mode data if active
+        if getattr(self.agent, 'imagination_mode', False):
+            msg["imagination_mode"] = True
+            msg["imagination_grid"] = getattr(self.agent, 'imagination_grid', None)
+            msg["imagination_reward"] = getattr(self.agent, 'imagination_reward', 0.0)
+            msg["imagination_win_prob"] = getattr(self.agent, 'imagination_win_prob', 0.0)
+            msg["imagination_step_count"] = getattr(self.agent, 'imagination_step_count', 0)
+        
         if include_grids:
             msg["grids"] = grids
 

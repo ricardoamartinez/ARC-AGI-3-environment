@@ -1,11 +1,15 @@
+"""Input processing for JEPA UI."""
 import pygame
 import sys
-from .state import GameState
+from .state import UIState
 from .network import NetworkHandler
-from .constants import *
+from .constants import HEATMAP_MODES, GRID_WIDTH_DEFAULT
+
 
 class InputProcessor:
-    def __init__(self, state: GameState, network: NetworkHandler):
+    """Processes pygame events and updates state."""
+    
+    def __init__(self, state: UIState, network: NetworkHandler):
         self.state = state
         self.network = network
 
@@ -33,7 +37,21 @@ class InputProcessor:
     def _handle_keydown(self, event):
         self.state.waiting_for_server = True
         
-        # Mapping pygame keys to actions
+        # In imagination mode, send actions to the world model instead of environment
+        if self.state.imagination_mode:
+            imagine_action_map = {
+                pygame.K_UP: ("IMAGINE_ACTION", {"dx": 0.0, "dy": -0.5, "disc": 0}),
+                pygame.K_DOWN: ("IMAGINE_ACTION", {"dx": 0.0, "dy": 0.5, "disc": 0}),
+                pygame.K_LEFT: ("IMAGINE_ACTION", {"dx": -0.5, "dy": 0.0, "disc": 0}),
+                pygame.K_RIGHT: ("IMAGINE_ACTION", {"dx": 0.5, "dy": 0.0, "disc": 0}),
+                pygame.K_SPACE: ("IMAGINE_ACTION", {"dx": 0.0, "dy": 0.0, "disc": 5}),  # Use action
+                pygame.K_RETURN: ("IMAGINE_ACTION", {"dx": 0.0, "dy": 0.0, "disc": 7}),  # Submit
+            }
+            if event.key in imagine_action_map:
+                action, params = imagine_action_map[event.key]
+                self.network.send_action(action, **params)
+                return
+        
         key_map = {
             pygame.K_UP: "ACTION1",
             pygame.K_DOWN: "ACTION2",
@@ -52,7 +70,6 @@ class InputProcessor:
                 self.state.running = False
             return
 
-        # Specific Logic
         if event.key == pygame.K_h:
             self.state.show_heatmap = not self.state.show_heatmap
         
@@ -67,6 +84,16 @@ class InputProcessor:
             self.state.holding_d_key = True
         elif event.key == pygame.K_p:
             self.state.holding_p_key = True
+        elif event.key == pygame.K_i:
+            # Toggle imagination mode
+            self.state.imagination_mode = not self.state.imagination_mode
+            if self.state.imagination_mode:
+                # Request to enter imagination mode
+                self.network.send_action("ENTER_IMAGINATION")
+                self.state.imagination_step_count = 0
+            else:
+                # Request to exit imagination mode
+                self.network.send_action("EXIT_IMAGINATION")
 
     def _handle_keyup(self, event):
         if event.key == pygame.K_d:
@@ -78,16 +105,9 @@ class InputProcessor:
         x, y = event.pos
         
         if self.state.game_select_mode:
-            # Game selection logic is handled in the renderer/app logic mainly because it needs layout info
-            # But we can try to handle it here if we knew the layout.
-            # For simplicity, the original code handled it inline.
-            # Ideally, we pass the click to the UI manager.
-            # We'll assume the main app loop handles UI interaction for Game Selection to keep this clean
-            # OR we emit a signal.
-            pass
+            pass  # Handled by app logic
             
-        elif event.button == 1: # Left Click
-            # Grid Interaction
+        elif event.button == 1:  # Left Click
             grid_w = self._get_current_grid_width(scale_factor)
             if x < grid_w:
                 gx = int(x / scale_factor)
@@ -95,12 +115,7 @@ class InputProcessor:
                 self.state.spatial_goal_pos = (gx, gy)
                 self.network.send_action("SET_SPATIAL_GOAL", x=gx, y=gy)
             
-            # UI Interaction is handled by UI components usually
-            # But for simplicity here, we can set flags that the App checks
-            # or we rely on the UI components `handle_event` method called from App.
-            pass
-            
-        elif event.button == 3: # Right Click
+        elif event.button == 3:  # Right Click
             grid_w = self._get_current_grid_width(scale_factor)
             if x < grid_w and self.state.spatial_goal_pos:
                 self.state.spatial_goal_pos = None
@@ -109,18 +124,14 @@ class InputProcessor:
     def _handle_mouseup(self, event):
         if event.button == 1:
             self.state.dragging_slider = False
-            # Key releases are handled in keyup, but if button release affects keys:
-            if self.state.holding_d_key: self.state.holding_d_key = False # Logic from original (maybe just UI button release?)
+            if self.state.holding_d_key: self.state.holding_d_key = False
             if self.state.holding_p_key: self.state.holding_p_key = False
 
     def _handle_mousemotion(self, event):
-        # Slider dragging handled in UI components
         pass
 
     def _get_current_grid_width(self, scale_factor):
-        # We need to know the grid dimensions.
         if self.state.current_grids:
             last_grid = self.state.current_grids[-1]
             return len(last_grid[0]) * scale_factor
-        return GRID_WIDTH_DEFAULT # Fallback
-
+        return GRID_WIDTH_DEFAULT

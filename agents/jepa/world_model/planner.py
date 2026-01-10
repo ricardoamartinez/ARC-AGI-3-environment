@@ -66,7 +66,18 @@ class CEMPlanner:
             
             z_batch = z_current.expand(self.num_samples, -1)
             z_traj = world_model.multi_step_rollout(z_batch, cont_actions, disc_actions)
-            rewards = torch.tensor([reward_fn(z_traj[i]) for i in range(self.num_samples)], device=device)
+            
+            # Compute rewards - pass action trajectory for reward prediction
+            rewards_list = []
+            for i in range(self.num_samples):
+                # Try to pass actions to reward_fn for step-reward prediction
+                try:
+                    r = reward_fn(z_traj[i], actions_traj=(cont_actions[i], disc_actions[i]))
+                except TypeError:
+                    # Fallback for reward functions that don't accept actions
+                    r = reward_fn(z_traj[i])
+                rewards_list.append(r)
+            rewards = torch.tensor(rewards_list, device=device)
             
             elite_idxs = torch.argsort(rewards, descending=True)[:self.num_elites]
             elite_cont, elite_disc = cont_actions[elite_idxs], disc_actions[elite_idxs]

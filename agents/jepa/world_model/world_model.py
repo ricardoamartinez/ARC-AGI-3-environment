@@ -27,7 +27,7 @@ Notes:
 """
 
 import logging
-from typing import Deque, Optional, List, Dict, Any
+from typing import Deque, Optional, List, Dict, Any, Tuple
 from collections import deque
 
 import numpy as np
@@ -35,21 +35,40 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .encoder import GridEncoder
+from .encoder import GridEncoder, GridDecoder, TemporalGridEncoder
 from .predictor import ActionConditionedPredictor
-from .win_predictor import WinPredictor, ValuePredictor
+from .win_predictor import WinPredictor, ValuePredictor, RewardPredictor
 from .planner import CEMPlanner
 from .mask_predictor import MaskedTokenPredictor
+from .patch_decoder import PatchDecoder
 
 logger = logging.getLogger()
 
 
 class TransitionBuffer:
-    """Buffer for single transitions (state, action, next_state)."""
+    """
+    Buffer for single transitions with prioritized replay and consolidation.
     
-    def __init__(self, capacity: int = 10000):
+    Features:
+    - Main buffer: FIFO with capacity, older samples evicted
+    - Consolidation buffer: Important samples never evicted (catastrophic forgetting prevention)
+    - Priority sampling: Higher prediction error = higher sampling probability
+    """
+    
+    def __init__(self, capacity: int = 10000, consolidation_size: int = 500):
         self.capacity = capacity
+        self.consolidation_size = consolidation_size
         self.buffer: deque = deque(maxlen=capacity)
+        
+        # Consolidation buffer for important/unique experiences (never evicted)
+        self.consolidation_buffer: List[Dict] = []
+        self.consolidation_priorities: List[float] = []  # Prediction error when added
+        
+        # Priority scores for main buffer (updated during training)
+        self.priorities: deque = deque(maxlen=capacity)
+        
+        # Track unique states seen
+        self._state_hashes: set = set()
 
     def add(
         self,
@@ -61,15 +80,82 @@ class TransitionBuffer:
         reward: float,
         done: bool,
         win: bool,
+        prediction_error: float = 1.0,  # Default high priority for new samples
     ) -> None:
-        self.buffer.append({
-            "state": state, "cont_action": cont_action, "disc_action": disc_action, "next_state": next_state,
-            "reward": reward, "done": done, "win": win,
-        })
+        transition = {
+            "state": state, "cont_action": cont_action, "disc_action": disc_action, 
+            "next_state": next_state, "reward": reward, "done": done, "win": win,
+        }
+        self.buffer.append(transition)
+        self.priorities.append(prediction_error + 0.1)  # Small epsilon for stability
+        
+        # Check if this is a unique/important state worth consolidating
+        state_hash = hash(state.numpy().tobytes())
+        is_unique = state_hash not in self._state_hashes
+        is_important = win or abs(reward) > 50 or prediction_error > 0.5
+        
+        if is_unique or is_important:
+            self._state_hashes.add(state_hash)
+            self._maybe_consolidate(transition, prediction_error)
+    
+    def _maybe_consolidate(self, transition: Dict, priority: float):
+        """Add to consolidation buffer if important enough."""
+        if len(self.consolidation_buffer) < self.consolidation_size:
+            # Buffer not full, just add
+            self.consolidation_buffer.append(transition)
+            self.consolidation_priorities.append(priority)
+        else:
+            # Replace lowest priority if this is higher
+            min_idx = np.argmin(self.consolidation_priorities)
+            if priority > self.consolidation_priorities[min_idx]:
+                self.consolidation_buffer[min_idx] = transition
+                self.consolidation_priorities[min_idx] = priority
+    
+    def update_priorities(self, indices: List[int], new_priorities: List[float]):
+        """Update priorities for sampled transitions (for TD-error style updates)."""
+        for idx, prio in zip(indices, new_priorities):
+            if 0 <= idx < len(self.priorities):
+                self.priorities[idx] = prio + 0.1
 
-    def sample(self, batch_size: int) -> Dict[str, torch.Tensor]:
-        idxs = np.random.choice(len(self.buffer), min(batch_size, len(self.buffer)), replace=False)
-        batch = [self.buffer[i] for i in idxs]
+    def sample(self, batch_size: int, consolidation_ratio: float = 0.1) -> Dict[str, torch.Tensor]:
+        """
+        Sample with mix of main buffer + consolidation buffer.
+        OPTIMIZED: Uses uniform sampling for O(1) time, not O(n) prioritized sampling.
+        
+        Args:
+            batch_size: Total samples to return
+            consolidation_ratio: Fraction from consolidation buffer (default 10%)
+        """
+        # Determine split
+        n_consolidation = min(
+            int(batch_size * consolidation_ratio),
+            len(self.consolidation_buffer)
+        )
+        n_main = batch_size - n_consolidation
+        
+        batch = []
+        sampled_indices = []
+        
+        # FAST uniform sampling from main buffer - O(1) not O(n)
+        if n_main > 0 and len(self.buffer) > 0:
+            buf_len = len(self.buffer)
+            # Use replacement for speed (no collision checking)
+            idxs = np.random.randint(0, buf_len, size=min(n_main, buf_len))
+            batch.extend([self.buffer[i] for i in idxs])
+            sampled_indices.extend(idxs.tolist())
+        
+        # Sample from consolidation buffer (uniform - all important)
+        if n_consolidation > 0:
+            cons_idxs = np.random.choice(
+                len(self.consolidation_buffer),
+                n_consolidation,
+                replace=False
+            )
+            batch.extend([self.consolidation_buffer[i] for i in cons_idxs])
+        
+        if not batch:
+            return None
+        
         return {
             "state": torch.stack([b["state"] for b in batch]),
             "cont_action": torch.stack([b["cont_action"] for b in batch]),
@@ -78,10 +164,11 @@ class TransitionBuffer:
             "reward": torch.tensor([float(b["reward"]) for b in batch], dtype=torch.float32),
             "done": torch.tensor([float(b["done"]) for b in batch], dtype=torch.float32),
             "win": torch.tensor([float(b["win"]) for b in batch], dtype=torch.float32),
+            "_sampled_indices": sampled_indices,  # For priority updates
         }
 
     def __len__(self):
-        return len(self.buffer)
+        return len(self.buffer) + len(self.consolidation_buffer)
 
 
 class SequenceBuffer:
@@ -130,23 +217,114 @@ class SequenceBuffer:
             self.current_episode = []
     
     def sample(self, batch_size: int) -> Optional[Dict[str, torch.Tensor]]:
-        """Sample a batch of sequences."""
-        if len(self.buffer) < batch_size:
+        """Sample a batch of sequences - OPTIMIZED for constant time."""
+        buf_len = len(self.buffer)
+        if buf_len < batch_size:
             return None
         
-        idxs = np.random.choice(len(self.buffer), min(batch_size, len(self.buffer)), replace=False)
-        batch = [self.buffer[i] for i in idxs]
+        # Fast random sampling with replacement for speed
+        idxs = torch.randint(0, buf_len, (batch_size,))
         
+        # Pre-allocate tensors for speed
         T = self.sequence_length
+        sample_0 = self.buffer[0]
+        H, W = sample_0["states"][0].shape
+        cont_dim = sample_0["cont_actions"][0].shape[0]
+        
+        states = torch.empty(batch_size, T, H, W, dtype=torch.uint8)
+        cont_actions = torch.empty(batch_size, T, cont_dim, dtype=torch.float32)
+        disc_actions = torch.empty(batch_size, T, dtype=torch.long)
+        final_states = torch.empty(batch_size, H, W, dtype=torch.uint8)
+        
+        for i, idx in enumerate(idxs):
+            b = self.buffer[idx.item()]
+            for t in range(T):
+                states[i, t] = b["states"][t]
+                cont_actions[i, t] = b["cont_actions"][t]
+                disc_actions[i, t] = b["disc_actions"][t]
+            final_states[i] = b["final_state"]
+        
         return {
-            "states": torch.stack([torch.stack(b["states"]) for b in batch]),  # (B, T, H, W)
-            "cont_actions": torch.stack([torch.stack(b["cont_actions"]) for b in batch]),  # (B, T, cont_dim)
-            "disc_actions": torch.stack([torch.stack(b["disc_actions"]) for b in batch]),  # (B, T)
-            "final_state": torch.stack([b["final_state"] for b in batch]),  # (B, H, W)
+            "states": states,
+            "cont_actions": cont_actions,
+            "disc_actions": disc_actions,
+            "final_state": final_states,
         }
     
     def __len__(self):
         return len(self.buffer)
+
+
+class EWCRegularizer:
+    """
+    Elastic Weight Consolidation (EWC) - Prevents catastrophic forgetting.
+    
+    Stores "important" weights after successful tasks and penalizes
+    changes to those weights during future training.
+    
+    Simplified version: Uses squared gradient magnitude as importance estimate.
+    """
+    
+    def __init__(self, model: nn.Module, ewc_lambda: float = 1000.0):
+        self.model = model
+        self.ewc_lambda = ewc_lambda
+        
+        # Storage for consolidated parameters and their importance
+        self.consolidated_params: Dict[str, torch.Tensor] = {}
+        self.importance: Dict[str, torch.Tensor] = {}
+        self.num_consolidations = 0
+    
+    @torch.no_grad()
+    def consolidate(self, dataloader_or_batch: Any = None):
+        """
+        Consolidate current weights as important.
+        
+        Call this after the model has learned something valuable
+        (e.g., after a win, after reaching a new state, periodically).
+        """
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                # Store current parameters
+                if name not in self.consolidated_params:
+                    self.consolidated_params[name] = param.clone().detach()
+                    self.importance[name] = torch.zeros_like(param)
+                else:
+                    # Running average of consolidated params
+                    alpha = 0.1
+                    self.consolidated_params[name] = (
+                        (1 - alpha) * self.consolidated_params[name] + 
+                        alpha * param.clone().detach()
+                    )
+                
+                # Estimate importance from gradient magnitude (if available)
+                if param.grad is not None:
+                    # Accumulate importance (online Fisher approximation)
+                    self.importance[name] = (
+                        0.9 * self.importance[name] + 
+                        0.1 * param.grad.detach() ** 2
+                    )
+        
+        self.num_consolidations += 1
+    
+    def penalty(self) -> torch.Tensor:
+        """
+        Compute EWC penalty loss.
+        
+        Returns:
+            Scalar penalty to add to training loss
+        """
+        if not self.consolidated_params:
+            return torch.tensor(0.0)
+        
+        loss = 0.0
+        for name, param in self.model.named_parameters():
+            if name in self.consolidated_params:
+                # Penalize deviation from consolidated weights, weighted by importance
+                diff = param - self.consolidated_params[name].to(param.device)
+                importance = self.importance[name].to(param.device)
+                loss = loss + (importance * diff ** 2).sum()
+        
+        return self.ewc_lambda * loss
 
 
 class WorldModel(nn.Module):
@@ -156,6 +334,9 @@ class WorldModel(nn.Module):
     - Block-causal Transformer predictor for dynamics
     - Teacher-forcing + Rollout loss (per paper Eq. 2-4)
     - Patch-level processing for rich representations
+    - Frame stacking for temporal/motion awareness
+    - EWC regularization for catastrophic forgetting prevention
+    - Consolidation buffer for important experiences
     """
     
     def __init__(
@@ -196,6 +377,15 @@ class WorldModel(nn.Module):
         rollout_loss_coef: float = 1.0,
         # Whether to use patch tokens or just CLS for dynamics
         use_patch_tokens: bool = True,
+        # Temporal encoding for motion awareness
+        use_temporal_encoder: bool = True,
+        num_frames: int = 4,  # Number of frames to stack
+        # EWC for catastrophic forgetting prevention
+        use_ewc: bool = True,
+        ewc_lambda: float = 100.0,
+        ewc_consolidate_every: int = 500,  # Consolidate every N steps
+        # Consolidation buffer size
+        consolidation_buffer_size: int = 500,
     ):
         super().__init__()
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -213,22 +403,53 @@ class WorldModel(nn.Module):
         self.rollout_steps = int(rollout_steps)
         self.rollout_loss_coef = float(rollout_loss_coef)
         self.use_patch_tokens = use_patch_tokens
+        self.use_temporal_encoder = use_temporal_encoder
+        self.num_frames = num_frames
+        self.use_ewc = use_ewc
+        self.ewc_consolidate_every = ewc_consolidate_every
+        self.consolidation_buffer_size = consolidation_buffer_size
         
         # Number of patches for predictor
         num_patches = (grid_size // patch_size) ** 2
 
-        # Encoder with 3D-RoPE (V-JEPA 2 style)
-        self.encoder = GridEncoder(
-            grid_size, patch_size, num_colors, latent_dim, encoder_depth,
-            use_rope=True  # Enable 3D-RoPE
-        ).to(self.device)
+        # Choose encoder based on temporal setting
+        if use_temporal_encoder:
+            # Temporal encoder with frame stacking + velocity channels
+            self.encoder = TemporalGridEncoder(
+                grid_size, patch_size, num_colors, latent_dim, encoder_depth,
+                num_frames=num_frames,
+            ).to(self.device)
+            
+            self.target_encoder = TemporalGridEncoder(
+                grid_size, patch_size, num_colors, latent_dim, encoder_depth,
+                num_frames=num_frames,
+            ).to(self.device)
+            logger.info(f"Using TemporalGridEncoder with {num_frames} frame stacking")
+        else:
+            # Standard encoder with 3D-RoPE
+            self.encoder = GridEncoder(
+                grid_size, patch_size, num_colors, latent_dim, encoder_depth,
+                use_rope=True
+            ).to(self.device)
+            
+            self.target_encoder = GridEncoder(
+                grid_size, patch_size, num_colors, latent_dim, encoder_depth,
+                use_rope=True
+            ).to(self.device)
         
-        # Target encoder (EMA)
-        self.target_encoder = GridEncoder(
-            grid_size, patch_size, num_colors, latent_dim, encoder_depth,
-            use_rope=True
-        ).to(self.device)
         self.target_encoder.load_state_dict(self.encoder.state_dict())
+        
+        # Patch-based decoder for high-fidelity reconstruction
+        # Uses ALL patch tokens (not just CLS) for better spatial detail
+        self.decoder = PatchDecoder(
+            latent_dim=latent_dim,
+            grid_size=grid_size,
+            patch_size=patch_size,
+            num_colors=num_colors,
+            hidden_dim=latent_dim * 4,  # Larger for better capacity
+        ).to(self.device)
+        # Higher learning rate for decoder to learn faster
+        self.decoder_opt = torch.optim.Adam(self.decoder.parameters(), lr=lr * 3)
         for p in self.target_encoder.parameters():
             p.requires_grad = False
 
@@ -249,6 +470,15 @@ class WorldModel(nn.Module):
         
         self.win_predictor = WinPredictor(latent_dim, latent_dim).to(self.device)
         self.value_predictor = ValuePredictor(latent_dim, latent_dim).to(self.device)
+        
+        # Reward predictor: R(z, a, z') -> expected reward for this transition
+        # This is CRITICAL for learning to avoid penalties!
+        self.reward_predictor = RewardPredictor(
+            latent_dim=latent_dim,
+            action_dim=self.continuous_action_dim + 64,  # cont + discrete embedding
+            hidden_dim=latent_dim,
+        ).to(self.device)
+        self.reward_pred_opt = torch.optim.Adam(self.reward_predictor.parameters(), lr=lr)
 
         if use_planner:
             self.planner = CEMPlanner(
@@ -262,8 +492,11 @@ class WorldModel(nn.Module):
         else:
             self.planner = None
 
-        # Buffers
-        self.buffer = TransitionBuffer(buffer_size)
+        # Buffers with consolidation for catastrophic forgetting prevention
+        self.buffer = TransitionBuffer(
+            capacity=buffer_size,
+            consolidation_size=consolidation_buffer_size
+        )
         self.sequence_buffer = SequenceBuffer(
             capacity=sequence_buffer_size,
             sequence_length=self.rollout_steps + 1  # Need T+1 states for T-step rollout
@@ -277,14 +510,34 @@ class WorldModel(nn.Module):
         self.predictor_opt = torch.optim.Adam(self.predictor.parameters(), lr=lr)
         self.win_opt = torch.optim.Adam(self.win_predictor.parameters(), lr=lr)
         
+        # EWC regularizer for catastrophic forgetting prevention
+        self.ewc: Optional[EWCRegularizer] = None
+        if use_ewc:
+            self.ewc = EWCRegularizer(self, ewc_lambda=ewc_lambda)
+            logger.info(f"EWC enabled: lambda={ewc_lambda}, consolidate_every={ewc_consolidate_every}")
+        
         self.ema_momentum = float(ema_momentum)
         self.train_steps = 0
         self.wins_seen = 0
         self.win_goal_latents: Deque[torch.Tensor] = deque(maxlen=int(win_goal_maxlen))
         
+        # Track last prediction error for priority updates
+        self._last_pred_error: float = 1.0
+        
+        # Imagination mode state
+        self.imagination_mode = False
+        self._imagination_state: Optional[torch.Tensor] = None
+        self._imagination_step_count = 0
+        self._imagination_reanchor_every = 3  # Re-encode every N steps to prevent drift
+        
+        # Honest rollout state for visualization (shows true multi-step quality)
+        self._rollout_z: Optional[torch.Tensor] = None
+        self._rollout_steps = 0
+        
         logger.info(
             f"WorldModel initialized: latent_dim={latent_dim}, device={self.device}, "
-            f"use_rope=True, use_patch_tokens={use_patch_tokens}, rollout_steps={rollout_steps}"
+            f"temporal={use_temporal_encoder}, frames={num_frames}, "
+            f"ewc={use_ewc}, rollout_steps={rollout_steps}"
         )
 
     @torch.no_grad()
@@ -328,6 +581,119 @@ class WorldModel(nn.Module):
             z = z[:, 0]
         return float(self.win_predictor(z).item())
 
+    @torch.no_grad()
+    def decode_grid(self, z: torch.Tensor) -> np.ndarray:
+        """
+        Decode latent embedding back to grid for visualization.
+        
+        Args:
+            z: (latent_dim,), (1, latent_dim) or (1, num_patches+1, latent_dim)
+            
+        Returns:
+            (grid_size, grid_size) decoded grid as numpy uint8
+        """
+        if self.decoder is None:
+            return np.zeros((self.grid_size, self.grid_size), dtype=np.uint8)
+        
+        if isinstance(z, np.ndarray):
+            z = torch.from_numpy(z).to(self.device)
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+        # PatchDecoder handles both 2D and 3D inputs
+        
+        grid = self.decoder.decode(z)  # (1, H, W)
+        return grid.squeeze(0).cpu().numpy().astype(np.uint8)
+
+    @torch.no_grad()
+    def predict_next_grid(
+        self,
+        grid: np.ndarray,
+        cont_action: np.ndarray,
+        disc_action: int = 0,
+    ) -> np.ndarray:
+        """
+        Predict next grid given current grid and action.
+        
+        NOTE: This is single-step prediction from a real grid.
+        For honest multi-step prediction like imagination mode, use
+        predict_next_grid_from_rollout() instead.
+        
+        Args:
+            grid: (H, W) current grid
+            cont_action: (cont_dim,) continuous action
+            disc_action: discrete action index
+            
+        Returns:
+            (H, W) predicted next grid
+        """
+        # Encode current grid with FULL patch tokens for better prediction
+        z = self.encode(grid, return_all_tokens=True)  # (1, num_patches+1, latent_dim)
+        
+        # Prepare actions
+        cont_t = torch.from_numpy(cont_action).float().unsqueeze(0).to(self.device)
+        disc_t = torch.tensor([disc_action], device=self.device)
+        
+        # Predict next latent (predictor handles full patch tokens)
+        z_next = self.predictor(z, cont_t, disc_t)  # (1, num_patches+1, latent_dim)
+        
+        # Decode to grid using full patch tokens
+        return self.decode_grid(z_next)
+    
+    # ==================== HONEST MULTI-STEP PREDICTION ====================
+    # These methods maintain rollout state to show true model quality
+    
+    def init_rollout_state(self, grid: np.ndarray) -> None:
+        """Initialize rollout state from a real grid (call once at start)."""
+        self._rollout_z = self.encode(grid, return_all_tokens=True)
+        self._rollout_steps = 0
+    
+    @torch.no_grad()
+    def predict_next_grid_from_rollout(
+        self,
+        cont_action: np.ndarray,
+        disc_action: int = 0,
+        real_grid: Optional[np.ndarray] = None,
+        reanchor_every: int = 10,
+    ) -> np.ndarray:
+        """
+        Predict next grid using ACCUMULATED rollout state (honest prediction).
+        
+        This is what imagination mode does - it predicts from previous predictions,
+        not from freshly encoded real grids. Shows true model quality.
+        
+        Args:
+            cont_action: Continuous action
+            disc_action: Discrete action
+            real_grid: If provided and steps >= reanchor_every, reset to real grid
+            reanchor_every: How often to re-ground to real grid (0 = never)
+            
+        Returns:
+            Predicted next grid
+        """
+        if self._rollout_z is None:
+            if real_grid is not None:
+                self.init_rollout_state(real_grid)
+            else:
+                raise RuntimeError("Call init_rollout_state first")
+        
+        # Prepare actions
+        cont_t = torch.from_numpy(cont_action).float().unsqueeze(0).to(self.device)
+        disc_t = torch.tensor([disc_action], device=self.device)
+        
+        # Predict from accumulated state (NOT from fresh encoding!)
+        z_next = self.predictor(self._rollout_z, cont_t, disc_t)
+        
+        # Update rollout state
+        self._rollout_z = z_next
+        self._rollout_steps += 1
+        
+        # Optional: re-anchor periodically to show "reset" quality
+        if reanchor_every > 0 and real_grid is not None and self._rollout_steps >= reanchor_every:
+            self._rollout_z = self.encode(real_grid, return_all_tokens=True)
+            self._rollout_steps = 0
+        
+        return self.decode_grid(z_next)
+
     def add_transition(
         self,
         *,
@@ -346,7 +712,7 @@ class WorldModel(nn.Module):
         ca = torch.as_tensor(cont_action, dtype=torch.float32)
         da = torch.as_tensor(int(disc_action), dtype=torch.long)
         
-        # Single-step buffer
+        # Single-step buffer with priority based on last prediction error
         self.buffer.add(
             state=st,
             cont_action=ca,
@@ -355,6 +721,7 @@ class WorldModel(nn.Module):
             reward=float(reward),
             done=bool(done),
             win=bool(win),
+            prediction_error=self._last_pred_error,
         )
         
         # Sequence buffer for rollout loss
@@ -410,9 +777,43 @@ class WorldModel(nn.Module):
         # === Teacher-forcing loss (Eq. 2) ===
         z_next_pred = self.predictor(z, cont_actions, disc_actions)
         teacher_forcing_loss = F.l1_loss(z_next_pred, z_next_target)
+        
+        # === ACTION-CONTRASTIVE LOSS ===
+        # Force model to produce DIFFERENT predictions for DIFFERENT actions
+        # If the model ignores actions, this loss will be high
+        action_contrastive_loss = None
+        if B >= 2:
+            # Generate counterfactual: what if we used a DIFFERENT action?
+            # Shuffle actions within batch
+            perm = torch.randperm(B, device=self.device)
+            shuffled_disc = disc_actions[perm]
+            shuffled_cont = cont_actions[perm]
+            
+            # Find samples where action actually changed
+            action_changed = (shuffled_disc != disc_actions)
+            
+            if action_changed.any():
+                # Predict with shuffled actions
+                z_counterfactual = self.predictor(z, shuffled_cont, shuffled_disc)
+                
+                # The predictions SHOULD be different where actions differ
+                # Compute L2 distance between predictions
+                pred_diff = (z_next_pred - z_counterfactual).pow(2).mean(dim=-1)
+                if z_next_pred.dim() == 3:
+                    pred_diff = pred_diff.mean(dim=-1)  # Average over patches
+                
+                # We WANT predictions to be different when actions differ
+                # Loss = -log(pred_diff) encourages larger differences
+                # Use margin: predictions should differ by at least margin
+                margin = 0.1
+                action_contrastive_loss = F.relu(margin - pred_diff[action_changed]).mean()
 
-        # === Rollout loss (Eq. 3) ===
+        # === Rollout loss (Eq. 3) with OPTIMIZED trajectory training ===
+        # Fast batched operations for constant-time training
         rollout_loss = None
+        rollout_decoder_loss = None
+        cycle_consistency_loss = None
+        
         if self.rollout_loss_coef > 0.0 and len(self.sequence_buffer) >= self.batch_size:
             seq_batch = self.sequence_buffer.sample(self.batch_size)
             if seq_batch is not None:
@@ -424,30 +825,74 @@ class WorldModel(nn.Module):
                 T = seq_states.shape[1]
                 B_seq = seq_states.shape[0]
                 
-                # Encode initial state
+                # BATCHED target encoding - encode ALL states in ONE forward pass
+                # Stack all states: (B, T, H, W) + final -> (B*(T+1), H, W)
+                all_states = torch.cat([
+                    seq_states.view(B_seq * T, self.grid_size, self.grid_size),
+                    final_state
+                ], dim=0)  # (B*T + B, H, W)
+                
+                with torch.no_grad():
+                    if self.use_patch_tokens:
+                        all_z_targets = self.target_encoder(all_states, return_all_tokens=True)
+                    else:
+                        all_z_targets = self.target_encoder.encode(all_states)
+                
+                # Encode initial state for rollout
                 if self.use_patch_tokens:
                     z_init = self.encoder(seq_states[:, 0], return_all_tokens=True)
                 else:
                     z_init = self.encoder.encode(seq_states[:, 0])
                 
-                # Autoregressive rollout
+                # Autoregressive rollout - only keep first and last for efficiency
                 z_current = z_init
+                z_first_pred = None
                 for t in range(T):
                     z_current = self.predictor(z_current, seq_cont[:, t], seq_disc[:, t])
+                    if t == 0:
+                        z_first_pred = z_current
+                z_final_pred = z_current
                 
-                # Target: encode final state
-                with torch.no_grad():
+                # Extract targets for first step and final step
+                # all_z_targets is (B*T + B, ...), split it
+                if self.use_patch_tokens:
+                    z_target_dim = all_z_targets.shape[1:]  # (num_patches+1, latent_dim)
+                    z_targets_seq = all_z_targets[:B_seq * T].view(B_seq, T, *z_target_dim)
+                    z_target_final = all_z_targets[B_seq * T:]  # (B, ...)
+                else:
+                    z_targets_seq = all_z_targets[:B_seq * T].view(B_seq, T, -1)
+                    z_target_final = all_z_targets[B_seq * T:]
+                
+                # Rollout loss: first prediction + final prediction (skip intermediate for speed)
+                loss_first = F.l1_loss(z_first_pred, z_targets_seq[:, 0] if T > 0 else z_target_final)
+                loss_final = F.l1_loss(z_final_pred, z_target_final)
+                rollout_loss = 0.3 * loss_first + 0.7 * loss_final  # Emphasize final
+                
+                # === DECODER ON FINAL ROLLOUT PREDICTION ONLY (fast) ===
+                if self.decoder is not None:
+                    z_final_detached = z_final_pred.detach()
+                    grid_logits_final = self.decoder(z_final_detached)
+                    rollout_decoder_loss = F.cross_entropy(grid_logits_final, final_state.long())
+                
+                # === CYCLE CONSISTENCY (every 4th step for speed) ===
+                if self.decoder is not None and self.train_steps % 4 == 0:
+                    with torch.no_grad():
+                        decoded_logits = self.decoder(z_final_detached)
+                        decoded_grid = decoded_logits.argmax(dim=1)
                     if self.use_patch_tokens:
-                        z_final_target = self.target_encoder(final_state, return_all_tokens=True)
+                        z_reencoded = self.encoder(decoded_grid, return_all_tokens=True)
                     else:
-                        z_final_target = self.target_encoder.encode(final_state)
-                
-                rollout_loss = F.l1_loss(z_current, z_final_target)
+                        z_reencoded = self.encoder.encode(decoded_grid)
+                    cycle_consistency_loss = F.l1_loss(z_reencoded, z_target_final)
 
         # === Combine losses (Eq. 4) ===
         predictor_loss = teacher_forcing_loss
+        if action_contrastive_loss is not None:
+            predictor_loss = predictor_loss + 1.0 * action_contrastive_loss  # Strong weight!
         if rollout_loss is not None:
             predictor_loss = predictor_loss + self.rollout_loss_coef * rollout_loss
+        if cycle_consistency_loss is not None:
+            predictor_loss = predictor_loss + 0.5 * cycle_consistency_loss
 
         # === Optional V-JEPA-style masked denoising ===
         mask_loss = None
@@ -487,6 +932,13 @@ class WorldModel(nn.Module):
             var_loss = torch.relu(float(self.variance_target) - mean_var)
             total_pred_loss = total_pred_loss + float(self.variance_coef) * var_loss
 
+        # === EWC penalty for catastrophic forgetting prevention ===
+        ewc_loss = None
+        if self.ewc is not None:
+            ewc_loss = self.ewc.penalty()
+            if ewc_loss.item() > 0:
+                total_pred_loss = total_pred_loss + ewc_loss
+        
         # === Backward pass ===
         self.encoder_opt.zero_grad(set_to_none=True)
         self.predictor_opt.zero_grad()
@@ -498,16 +950,70 @@ class WorldModel(nn.Module):
         
         self.encoder_opt.step()
         self.predictor_opt.step()
+        
+        # Track prediction error for priority updates
+        self._last_pred_error = float(teacher_forcing_loss.detach().item())
+        
+        # Periodic EWC consolidation
+        if self.ewc is not None and self.train_steps % self.ewc_consolidate_every == 0:
+            self.ewc.consolidate()
 
         # === Win predictor (uses CLS token) ===
         with torch.no_grad():
             z_detached = self.encoder.encode(states)
+            z_next_detached = self.encoder.encode(next_states)
         win_logits = self.win_predictor.forward_logits(z_detached)
         win_loss = F.binary_cross_entropy_with_logits(win_logits.squeeze(-1), wins)
 
         self.win_opt.zero_grad(set_to_none=True)
         win_loss.backward()
         self.win_opt.step()
+        
+        # === Reward predictor: Learn R(z, a, z') from actual rewards ===
+        # This is CRITICAL for penalty avoidance!
+        rewards_batch = batch["reward"].to(self.device)
+        
+        # Embed discrete action for reward predictor
+        disc_embed = self.predictor.discrete_embed(disc_actions)  # (B, 64)
+        action_combined = torch.cat([cont_actions, disc_embed], dim=-1)  # (B, cont_dim + 64)
+        
+        pred_rewards = self.reward_predictor(z_detached, action_combined, z_next_detached)
+        reward_loss = F.mse_loss(pred_rewards.squeeze(-1), rewards_batch)
+        
+        self.reward_pred_opt.zero_grad(set_to_none=True)
+        reward_loss.backward()
+        self.reward_pred_opt.step()
+        
+        # === Decoder training: Reconstruct grid from latent ===
+        # Uses FULL patch tokens for high-fidelity spatial reconstruction
+        decoder_loss = None
+        if self.decoder is not None:
+            # Encode states with FULL patch tokens (not just CLS)
+            z_for_decode = self.encoder(states, return_all_tokens=True).detach()
+            
+            # Decode to grid logits using all patch tokens
+            grid_logits = self.decoder(z_for_decode)  # (B, num_colors, H, W)
+            states_long = states.long()
+            decoder_loss_current = F.cross_entropy(grid_logits, states_long)
+            
+            # Part 2: Decode PREDICTED next states (critical for moving objects!)
+            # Use full patch tokens from predictor
+            z_next_pred_for_decode = z_next_pred.detach()
+            grid_logits_pred = self.decoder(z_next_pred_for_decode)
+            next_states_long = next_states.long()
+            decoder_loss_pred = F.cross_entropy(grid_logits_pred, next_states_long)
+            
+            # Combined loss with emphasis on predicted states (for dynamics)
+            decoder_loss = 0.2 * decoder_loss_current + 0.3 * decoder_loss_pred
+            
+            # Add rollout decoder loss - CRITICAL for multi-step imagination
+            if rollout_decoder_loss is not None:
+                decoder_loss = decoder_loss + 0.5 * rollout_decoder_loss
+            
+            self.decoder_opt.zero_grad(set_to_none=True)
+            decoder_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.decoder.parameters(), 1.0)
+            self.decoder_opt.step()
 
         # === EMA update ===
         with torch.no_grad():
@@ -521,24 +1027,34 @@ class WorldModel(nn.Module):
             "teacher_forcing_loss": float(teacher_forcing_loss.item()),
             "predictor_loss": float(predictor_loss.item()),
             "win_loss": float(win_loss.item()),
+            "reward_loss": float(reward_loss.item()),
             "buffer_size": len(self.buffer),
             "sequence_buffer_size": len(self.sequence_buffer),
             "wins_seen": self.wins_seen,
         }
+        if action_contrastive_loss is not None:
+            out["action_contrast_loss"] = float(action_contrastive_loss.item())
         if rollout_loss is not None:
             out["rollout_loss"] = float(rollout_loss.item())
+        if rollout_decoder_loss is not None:
+            out["rollout_dec_loss"] = float(rollout_decoder_loss.item())
+        if cycle_consistency_loss is not None:
+            out["cycle_loss"] = float(cycle_consistency_loss.item())
         if mask_loss is not None:
             out["mask_loss"] = float(mask_loss.item())
         if mean_var is not None:
             out["latent_var_mean"] = float(mean_var.item())
         if var_loss is not None:
             out["var_loss"] = float(var_loss.item())
+        if decoder_loss is not None:
+            out["decoder_loss"] = float(decoder_loss.item())
         return out
 
     @torch.no_grad()
     def plan_action(self, grid):
         """
-        Plan action using CEM with goal-conditioned L1 distance (V-JEPA 2-AC style).
+        Plan action using CEM with goal-conditioned L1 distance (V-JEPA 2-AC style)
+        PLUS learned reward prediction (critical for penalty avoidance).
         
         Uses CLS token for planning efficiency, even when training uses patch tokens.
         """
@@ -558,24 +1074,88 @@ class WorldModel(nn.Module):
             # Sample a goal to avoid overfitting to a single win state.
             goal_latent = self.win_goal_latents[np.random.randint(0, len(self.win_goal_latents))].to(self.device)
 
-        def reward_fn(z_traj: torch.Tensor) -> float:
-            # z_traj: (H+1, latent_dim) or (H+1, num_patches+1, latent_dim)
-            z_final = z_traj[-1]
-            # Handle patch tokens case
-            if z_final.dim() == 2:
-                z_final = z_final[0]  # Use CLS token
+        # Coefficients for reward components
+        goal_dist_coef = 1.0
+        reward_pred_coef = 10.0  # Amplify reward signal for penalty avoidance
+        win_prob_coef = 1.0
+
+        def reward_fn(z_traj: torch.Tensor, actions_traj: tuple = None) -> float:
+            """
+            Compute reward for a trajectory. Combines:
+            1. Goal distance (V-JEPA 2-AC style)
+            2. Predicted step rewards (for penalty avoidance!)
+            3. Win probability
+            
+            actions_traj: (cont_actions, disc_actions) tuple if provided by planner
+            """
+            total_reward = 0.0
+            
+            # Handle different trajectory formats
+            if z_traj.dim() == 3:
+                # (H+1, num_patches+1, latent_dim) -> use CLS tokens
+                z_sequence = z_traj[:, 0, :]  # (H+1, latent_dim)
+            else:
+                z_sequence = z_traj  # (H+1, latent_dim)
+            
+            z_final = z_sequence[-1]
+            
+            # 1. Goal distance term (minimize L1 to goal)
             if goal_latent is not None:
-                # Maximize negative distance = minimize L1 distance (V-JEPA 2-AC Eq. 5)
-                return -float(F.l1_loss(z_final, goal_latent, reduction="mean").item())
-            # Fallback: maximize predicted win probability.
-            return float(self.win_predictor(z_final.unsqueeze(0)).item())
+                goal_dist = float(F.l1_loss(z_final, goal_latent, reduction="mean").item())
+                total_reward -= goal_dist_coef * goal_dist
+            else:
+                # Fallback: maximize win probability
+                total_reward += win_prob_coef * float(self.win_predictor(z_final.unsqueeze(0)).item())
+            
+            # 2. Sum of predicted step rewards (CRITICAL for penalty avoidance!)
+            # This makes the planner avoid actions that lead to penalties
+            if actions_traj is not None and len(z_sequence) > 1:
+                cont_actions, disc_actions = actions_traj
+                for t in range(len(z_sequence) - 1):
+                    z_t = z_sequence[t]
+                    z_next = z_sequence[t + 1]
+                    
+                    # Get action embedding
+                    disc_embed = self.predictor.discrete_embed(disc_actions[t:t+1])  # (1, 64)
+                    cont_t = cont_actions[t:t+1]  # (1, cont_dim)
+                    action_combined = torch.cat([cont_t, disc_embed], dim=-1)  # (1, cont_dim + 64)
+                    
+                    # Predict reward for this step
+                    pred_r = self.reward_predictor(
+                        z_t.unsqueeze(0),
+                        action_combined,
+                        z_next.unsqueeze(0)
+                    )
+                    total_reward += reward_pred_coef * float(pred_r.item())
+            
+            return total_reward
 
         best_cont, best_disc, best_reward = self.planner.plan(z, self.predictor, reward_fn, self.device)
         return best_cont.detach().cpu().numpy().astype(np.float32), int(best_disc), float(best_reward)
 
+    @torch.no_grad()
+    def multi_step_rollout(
+        self,
+        z: torch.Tensor,
+        continuous_actions: torch.Tensor,
+        discrete_actions: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Wrapper for predictor's multi-step rollout (used by CEM planner).
+        
+        Args:
+            z: (batch, latent_dim) initial CLS latent
+            continuous_actions: (batch, horizon, continuous_dim)
+            discrete_actions: (batch, horizon)
+        Returns:
+            z_trajectory: (batch, horizon+1, latent_dim)
+        """
+        return self.predictor.multi_step_rollout(z, continuous_actions, discrete_actions)
+    
     def save(self, path):
         torch.save({"encoder": self.encoder.state_dict(), "target_encoder": self.target_encoder.state_dict(),
                    "predictor": self.predictor.state_dict(), "win_predictor": self.win_predictor.state_dict(),
+                   "reward_predictor": self.reward_predictor.state_dict(),
                    "train_steps": self.train_steps, "wins_seen": self.wins_seen}, path)
 
     def load(self, path):
@@ -584,5 +1164,150 @@ class WorldModel(nn.Module):
         self.target_encoder.load_state_dict(ckpt["target_encoder"])
         self.predictor.load_state_dict(ckpt["predictor"])
         self.win_predictor.load_state_dict(ckpt["win_predictor"])
+        if "reward_predictor" in ckpt:
+            self.reward_predictor.load_state_dict(ckpt["reward_predictor"])
         self.train_steps = ckpt.get("train_steps", 0)
         self.wins_seen = ckpt.get("wins_seen", 0)
+    
+    # ==================== IMAGINATION MODE ====================
+    # Play inside the world model's imagination to see what it predicts
+    
+    def enter_imagination(self, initial_grid: np.ndarray) -> np.ndarray:
+        """
+        Enter imagination mode starting from a given state.
+        
+        The world model will now predict future states based on actions,
+        simulating what it thinks will happen without the real environment.
+        
+        Args:
+            initial_grid: Starting state to imagine from
+            
+        Returns:
+            The initial imagined state (decoded from latent)
+        """
+        self.imagination_mode = True
+        self._imagination_step_count = 0
+        self._imagination_reanchor_every = 3  # Re-encode every N steps to prevent drift
+        
+        # Reset temporal encoder history first so we start fresh
+        if self.use_temporal_encoder and hasattr(self.encoder, 'reset_history'):
+            self.encoder.reset_history()
+        
+        # Encode initial state - MUST use return_all_tokens=True for patch decoder!
+        z = self.encode(initial_grid, return_all_tokens=True)
+        self._imagination_state = z
+        
+        # Return decoded initial state
+        return self.decode_grid(z)
+    
+    def exit_imagination(self):
+        """Exit imagination mode and return to reality."""
+        self.imagination_mode = False
+        self._imagination_state = None
+        
+        # Reset temporal encoder history
+        if self.use_temporal_encoder and hasattr(self.encoder, 'reset_history'):
+            self.encoder.reset_history()
+    
+    @torch.no_grad()
+    def imagine_step(
+        self,
+        cont_action: np.ndarray,
+        disc_action: int = 0,
+    ) -> Tuple[np.ndarray, float, float]:
+        """
+        Take a step in imagination mode.
+        
+        Uses the world model to predict what would happen if the given
+        action were taken in the current imagined state.
+        
+        Args:
+            cont_action: Continuous action (cursor movement)
+            disc_action: Discrete action (button press)
+            
+        Returns:
+            Tuple of:
+            - predicted_grid: The imagined next state decoded to grid
+            - predicted_reward: What the model thinks the reward would be
+            - win_prob: Probability of winning from this state
+        """
+        if not self.imagination_mode or self._imagination_state is None:
+            raise RuntimeError("Not in imagination mode. Call enter_imagination first.")
+        
+        # Prepare actions
+        cont_t = torch.from_numpy(cont_action).float().unsqueeze(0).to(self.device)
+        disc_t = torch.tensor([disc_action], device=self.device)
+        
+        z_current = self._imagination_state
+        
+        # Predict next latent state (preserves patch tokens)
+        z_next = self.predictor(z_current, cont_t, disc_t)
+        
+        # Decode to grid using full patch tokens
+        predicted_grid = self.decode_grid(z_next)
+        
+        # Track step count (no re-anchoring needed with proper cycle-consistency training)
+        self._imagination_step_count += 1
+        
+        # Extract CLS tokens for scalar predictors (reward, win)
+        # Full patch tokens: (B, num_patches+1, latent_dim), CLS is at index 0
+        if z_current.dim() == 3:
+            z_current_cls = z_current[:, 0]  # (B, latent_dim)
+            z_next_cls = z_next[:, 0]  # (B, latent_dim)
+        else:
+            z_current_cls = z_current
+            z_next_cls = z_next
+        
+        # Predict reward for this transition
+        disc_embed = self.predictor.discrete_embed(disc_t)
+        action_combined = torch.cat([cont_t, disc_embed], dim=-1)
+        pred_reward = float(self.reward_predictor(z_current_cls, action_combined, z_next_cls).item())
+        
+        # Predict win probability
+        win_prob = float(self.win_predictor(z_next_cls).item())
+        
+        # Update imagination state (keep full patch tokens for next prediction)
+        self._imagination_state = z_next
+        
+        return predicted_grid, pred_reward, win_prob
+    
+    @torch.no_grad()
+    def imagine_trajectory(
+        self,
+        cont_actions: np.ndarray,
+        disc_actions: np.ndarray,
+        initial_grid: Optional[np.ndarray] = None,
+    ) -> List[Tuple[np.ndarray, float, float]]:
+        """
+        Imagine a full trajectory of actions.
+        
+        Args:
+            cont_actions: (T, cont_dim) sequence of continuous actions
+            disc_actions: (T,) sequence of discrete actions
+            initial_grid: Optional starting state (uses current if not provided)
+            
+        Returns:
+            List of (predicted_grid, predicted_reward, win_prob) for each step
+        """
+        if initial_grid is not None:
+            self.enter_imagination(initial_grid)
+        elif not self.imagination_mode:
+            raise RuntimeError("Either provide initial_grid or call enter_imagination first")
+        
+        results = []
+        T = len(cont_actions)
+        
+        for t in range(T):
+            grid, reward, win_p = self.imagine_step(cont_actions[t], int(disc_actions[t]))
+            results.append((grid, reward, win_p))
+        
+        return results
+    
+    def get_imagination_state(self) -> Optional[torch.Tensor]:
+        """Get current latent state in imagination mode."""
+        return self._imagination_state
+    
+    def set_imagination_state(self, z: torch.Tensor):
+        """Set imagination state directly (for branching)."""
+        self._imagination_state = z.to(self.device)
+        self.imagination_mode = True

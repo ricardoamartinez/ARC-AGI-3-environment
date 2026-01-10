@@ -1,14 +1,21 @@
+"""UI Components for JEPA visualization."""
 import pygame
 from typing import Tuple, Optional
 
+
 class UIComponent:
+    """Base class for UI components."""
+    
     def draw(self, screen: pygame.Surface):
         pass
 
     def handle_event(self, event: pygame.event.Event) -> bool:
         return False
 
+
 class Button(UIComponent):
+    """Clickable button component."""
+    
     def __init__(self, rect: pygame.Rect, text: str, font: pygame.font.Font, 
                  bg_color: Tuple[int, int, int], text_color: Tuple[int, int, int],
                  active_color: Optional[Tuple[int, int, int]] = None,
@@ -39,7 +46,10 @@ class Button(UIComponent):
                 return True
         return False
 
+
 class Slider(UIComponent):
+    """Draggable slider component."""
+    
     def __init__(self, rect: pygame.Rect, min_val: float, max_val: float, initial_val: float, 
                  callback=None):
         self.rect = rect
@@ -79,7 +89,10 @@ class Slider(UIComponent):
         if self.callback:
             self.callback(self.value)
 
+
 class Graph:
+    """Line graph for displaying metrics history."""
+    
     def __init__(self, rect: pygame.Rect, title: str, data_key: str, color: Tuple[int, int, int], 
                  min_val: Optional[float] = None, max_val: Optional[float] = None):
         self.rect = rect
@@ -121,4 +134,3 @@ class Graph:
             curr = vals[-1]
             v_surf = font.render(f"{curr:.2f}", True, self.color)
             screen.blit(v_surf, (self.rect.right - v_surf.get_width(), self.rect.y - 20))
-

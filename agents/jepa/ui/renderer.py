@@ -1,40 +1,45 @@
+"""Rendering for JEPA UI."""
 import pygame
 import collections
 from typing import Dict, Tuple, List, Optional
 
-from ..state import GameState
-from ..constants import *
+from .state import UIState
+from .constants import *
 from .components import Button, Slider, Graph
-from ..utils import get_inverse_color
+from .utils import get_inverse_color
+
 
 class GameRenderer:
+    """Renders the game grid and UI elements."""
+    
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
         self.fonts = fonts
         self.palette = BASE_PALETTE.copy()
         
     def update_palette(self, grid: List[List[int]]):
-        """Dynamic background logic."""
-        flat_grid = [c for row in grid for c in row]
-        if flat_grid:
-            counter = collections.Counter(flat_grid)
-            bg_val, _ = counter.most_common(1)[0]
-            
+        """Dynamic background logic - swap dominant color with black."""
+        try:
+            flat_grid = [int(c) for row in grid for c in row]
+            if flat_grid:
+                counter = collections.Counter(flat_grid)
+                bg_val, _ = counter.most_common(1)[0]
+                
+                new_palette = BASE_PALETTE.copy()
+                
+                if bg_val != 0:
+                    original_bg_color = new_palette.get(bg_val, (0, 0, 0))
+                    new_palette[bg_val] = (0, 0, 0)
+                    new_palette[0] = original_bg_color
+                
+                self.palette = new_palette
+        except Exception:
+            # Fallback to base palette on any error
             self.palette = BASE_PALETTE.copy()
-            
-            if bg_val != 0:
-                original_bg_color = self.palette.get(bg_val, (0,0,0))
-                
-                # Set dominant to Black
-                self.palette[bg_val] = (0, 0, 0)
-                
-                # Set 0 to the original color of the dominant (Swap)
-                self.palette[0] = original_bg_color
 
-    def draw_game_selector(self, state: GameState):
+    def draw_game_selector(self, state: UIState):
         self.screen.fill((20, 20, 20))
         
-        # Title
         title_surf = self.fonts["title"].render("SELECT A GAME", True, (255, 255, 255))
         self.screen.blit(title_surf, (self.screen.get_width() // 2 - title_surf.get_width() // 2, 20))
         
@@ -43,7 +48,6 @@ class GameRenderer:
             self.screen.blit(loading_surf, (self.screen.get_width() // 2 - loading_surf.get_width() // 2, 100))
             return
 
-        # Grid Layout
         cols = 4
         box_w = 150
         box_h = 150
@@ -63,15 +67,12 @@ class GameRenderer:
             rect = pygame.Rect(x, y, box_w, box_h)
             is_hovered = rect.collidepoint(mx, my)
             
-            # Draw Box
             color = (50, 50, 50) if not is_hovered else (80, 80, 80)
             pygame.draw.rect(self.screen, color, rect)
             pygame.draw.rect(self.screen, (100, 100, 100), rect, 2)
             
-            # Thumbnail
             self._draw_thumbnail(g.get("thumbnail"), x, y, box_w, box_h)
             
-            # Title
             g_title = g.get("title", g["game_id"][:4].upper())
             text_surf = self.fonts["title"].render(g_title, True, (0, 0, 0))
             text_rect = text_surf.get_rect(center=(x + box_w // 2, y + box_h - 15))
@@ -97,14 +98,13 @@ class GameRenderer:
             scale_y = thumb_area_h / grid_rows
             thumb_scale = min(scale_x, scale_y, 8)
             
-            # Local palette calculation
             flat_grid = [c for row in thumbnail for c in row]
             thumb_palette = BASE_PALETTE.copy()
             if flat_grid:
                 counter = collections.Counter(flat_grid)
                 bg_val, _ = counter.most_common(1)[0]
                 if bg_val != 0:
-                    original_bg_color = thumb_palette.get(bg_val, (0,0,0))
+                    original_bg_color = thumb_palette.get(bg_val, (0, 0, 0))
                     thumb_palette[bg_val] = (0, 0, 0)
                     thumb_palette[0] = original_bg_color
             
@@ -126,28 +126,25 @@ class GameRenderer:
                     if cell_x < x + box_w - 2 and cell_y < y + box_h - 30:
                          pygame.draw.rect(self.screen, color_val, (cell_x, cell_y, cell_w, cell_h))
 
-    def draw_main_interface(self, state: GameState, scale_factor: int, grid_width: int):
+    def draw_main_interface(self, state: UIState, scale_factor: int, grid_width: int):
         self.screen.fill(BG_COLOR)
         
-        # Draw Sidebar
         self._draw_sidebar_bg(grid_width)
         self._draw_info_panel(state, grid_width)
         self._draw_graphs(state, grid_width)
-        self._draw_controls_placeholder(grid_width) # Controls drawn by app logic mostly?
-        # Actually controls in original were drawn here, so we should expose methods or just draw them
-        
-        # Draw Grid
         self._draw_grid(state, scale_factor, grid_width)
-        
-        # Overlays
         self._draw_overlays(state, scale_factor)
         self._draw_keyboard(state)
+        
+        # Draw imagination mode overlay if active
+        if state.imagination_mode:
+            self._draw_imagination_overlay(state, grid_width)
 
     def _draw_sidebar_bg(self, x_start):
         pygame.draw.rect(self.screen, SIDEBAR_BG, (x_start, 0, SIDEBAR_WIDTH, self.screen.get_height()))
         pygame.draw.line(self.screen, BORDER_COLOR, (x_start, 0), (x_start, self.screen.get_height()), 2)
 
-    def _draw_info_panel(self, state: GameState, x_start):
+    def _draw_info_panel(self, state: UIState, x_start):
         pad = 20
         curr_y = 20
         x = x_start + pad
@@ -184,7 +181,6 @@ class GameRenderer:
             draw_line("Last Action:", "normal", (200, 200, 200))
             draw_line(aname, "title", (0, 200, 255))
             
-            # Overlay at bottom left
             overlay_surf = self.fonts["overlay"].render(aname, True, (0, 255, 255))
             shadow_surf = self.fonts["overlay"].render(aname, True, (0, 0, 0))
             self.screen.blit(shadow_surf, (22, self.screen.get_height() - 48))
@@ -194,19 +190,13 @@ class GameRenderer:
         draw_line("CONTROLS:", "title")
         draw_line("ARROWS: Move  SPACE: Use", "normal", (150, 150, 150))
         draw_line("CLICK: Set Goal  R-CLICK: Clear", "normal", (0, 255, 0))
-        draw_line("0-9: Select Channel", "normal", (150, 150, 150))
-        draw_line("D: Dopamine  P: Pain  G: Goal shaping  Q: Quit", "normal", (150, 150, 150))
+        draw_line("0-9: Select Channel  I: Imagine", "normal", (150, 150, 150))
+        draw_line("D: Dopamine  P: Pain  Q: Quit", "normal", (150, 150, 150))
 
-    def _draw_graphs(self, state: GameState, x_start):
-        # We assume the main App class handles the Graph object creation/updating, 
-        # but here we can just draw them if we had them passed in.
-        # However, to keep it stateless here, we might just redraw the data.
-        # Let's adapt the original logic which reconstructs them on the fly essentially
-        
+    def _draw_graphs(self, state: UIState, x_start):
         GRAPHS_Y_START = 350
         CONTROLS_Y_START = self.screen.get_height() - 200
         
-        # Graphs available from the simplified PPO loop.
         graph_titles = [
             ("Reward", "reward", (0, 255, 0), None, None),
             ("Dopamine (Human)", "manual_dopamine", (255, 120, 120), 0.0, 1.0),
@@ -232,36 +222,33 @@ class GameRenderer:
             g = Graph(rect, title, key, color, min_v, max_v)
             g.draw(self.screen, state.metrics_history.get(key, []), self.fonts["normal"])
 
-    def _draw_controls_placeholder(self, x_start):
-        # This is where buttons live. 
-        # Since buttons handle events, they should probably be managed by the App/Input handler
-        # and passed here to be drawn, OR we draw them here if they are stateless enough.
-        # But they have interaction.
-        # For now, we'll assume the App will call specific draw methods for controls 
-        # or we just draw the static parts here.
-        pass
-
-    def _draw_grid(self, state: GameState, scale: int, grid_width: int):
+    def _draw_grid(self, state: UIState, scale: int, grid_width: int):
         if not state.current_grids:
             return
 
-        current_grid = state.current_grids[state.current_grid_idx]
+        # In imagination mode, use the imagined grid (decoded from world model latent)
+        if state.imagination_mode and state.imagination_grid is not None:
+            current_grid = state.imagination_grid
+        else:
+            current_grid = state.current_grids[state.current_grid_idx]
         rows = len(current_grid)
         cols = len(current_grid[0])
         
         pygame.draw.rect(self.screen, (0, 0, 0), (0, 0, grid_width, self.screen.get_height()))
 
         if not state.show_heatmap:
+            # Safety check: ensure palette is a dict
+            palette = self.palette if isinstance(self.palette, dict) else BASE_PALETTE
             for r in range(rows):
                 for c in range(cols):
                     val = current_grid[r][c]
-                    color = self.palette.get(val, (50, 50, 50))
+                    color = palette.get(int(val), (50, 50, 50))
                     rect = (c * scale, r * scale, scale, scale)
                     pygame.draw.rect(self.screen, color, rect)
         else:
             self._draw_heatmap(state, scale, rows, cols)
 
-    def _draw_heatmap(self, state: GameState, scale: int, rows: int, cols: int):
+    def _draw_heatmap(self, state: UIState, scale: int, rows: int, cols: int):
         mode = state.selected_heatmap_mode
         if mode not in state.current_maps:
             return
@@ -288,15 +275,14 @@ class GameRenderer:
                     rect = (c * scale, r * scale, scale, scale)
                     pygame.draw.rect(self.screen, color, rect)
         
-        # Title Overlay
         title = f"CHANNEL: {mode.upper()}"
         t_surf = self.fonts["overlay"].render(title, True, hm_color)
-        t_shad = self.fonts["overlay"].render(title, True, (0,0,0))
+        t_shad = self.fonts["overlay"].render(title, True, (0, 0, 0))
         self.screen.blit(t_shad, (22, 22))
         self.screen.blit(t_surf, (20, 20))
 
-    def _draw_overlays(self, state: GameState, scale: int):
-        # Goal Flag (training target)
+    def _draw_overlays(self, state: UIState, scale: int):
+        # Goal Flag
         if state.spatial_goal_pos:
             gx, gy = state.spatial_goal_pos
             fx = gx * scale + scale // 2
@@ -333,7 +319,6 @@ class GameRenderer:
         if state.visual_cursor_pos:
             cx, cy = state.visual_cursor_pos
             
-            # Highlight cell
             active_cx, active_cy = int(round(cx)), int(round(cy))
             if state.current_grids:
                 grid = state.current_grids[0]
@@ -344,7 +329,6 @@ class GameRenderer:
                     self.screen.blit(s, rect)
                     pygame.draw.rect(self.screen, (0, 100, 255), rect, 2)
             
-            # Cursor Sprite
             tip_x = cx * scale + (scale / 2)
             tip_y = cy * scale + (scale / 2)
             self._draw_cursor_sprite(tip_x, tip_y)
@@ -363,17 +347,18 @@ class GameRenderer:
         pygame.draw.polygon(self.screen, (255, 255, 255), screen_pts)
         pygame.draw.polygon(self.screen, (0, 0, 0), screen_pts, 1)
 
-    def _draw_keyboard(self, state: GameState):
+    def _draw_keyboard(self, state: UIState):
         kb_base_x = 30
         kb_base_y = self.screen.get_height() - 150
         
+        # Keys: (state_lookup_key, display_label, x, y, w, h)
         keys = [
-            ("↑", "↑", 50, 0, 40, 40),
-            ("←", "←", 5, 45, 40, 40),
-            ("↓", "↓", 50, 45, 40, 40),
-            ("→", "→", 95, 45, 40, 40),
-            ("↵", "ENT", 145, 45, 60, 40),
-            ("␣", "", 5, 90, 130, 30)
+            ("UP", "\u2191", 50, 0, 40, 40),       # ↑
+            ("LEFT", "\u2190", 5, 45, 40, 40),     # ←
+            ("DOWN", "\u2193", 50, 45, 40, 40),    # ↓
+            ("RIGHT", "\u2192", 95, 45, 40, 40),   # →
+            ("ENTER", "ENT", 145, 45, 60, 40),
+            ("SPACE", "", 5, 90, 130, 30)          # Empty label for space
         ]
         
         for k_sym, k_label, kx, ky, kw, kh in keys:
@@ -382,33 +367,27 @@ class GameRenderer:
             now = pygame.time.get_ticks()
             time_diff = now - last_act
             
-            # Flash on the exact frame of activation (or very recently)
-            # White/Green = action had effect, Red = action was penalized (no effect)
             brightness = 50
             is_active = False
             
-            if time_diff < 50: # Instant flash duration (50ms)
+            if time_diff < 50:
                 brightness = 255
                 is_active = True
             elif time_diff < KEY_FADE_DURATION:
                 ratio = 1.0 - (time_diff / KEY_FADE_DURATION)
-                brightness = int(50 + ratio * 200) # Fade out
+                brightness = int(50 + ratio * 200)
             
             rect = pygame.Rect(kb_base_x + kx, kb_base_y + ky, kw, kh)
             
-            # Draw key background - RED if penalized, WHITE/GRAY otherwise
             if is_active or time_diff < KEY_FADE_DURATION:
                 if was_penalized:
-                    # Red tint for penalized actions (no effect)
                     bg_color = (brightness, int(brightness * 0.3), int(brightness * 0.3))
                 else:
-                    # Normal white/gray for effective actions
                     bg_color = (brightness, brightness, brightness)
             else:
                 bg_color = (brightness, brightness, brightness)
             pygame.draw.rect(self.screen, bg_color, rect, border_radius=5)
             
-            # Draw border (green if effective, red if penalized, gray if inactive)
             if is_active:
                 border_col = (255, 50, 50) if was_penalized else (0, 255, 0)
             else:
@@ -420,4 +399,57 @@ class GameRenderer:
                 label_surf = self.fonts["title"].render(k_label, True, text_col)
                 label_rect = label_surf.get_rect(center=rect.center)
                 self.screen.blit(label_surf, label_rect)
-
+    
+    def _draw_imagination_overlay(self, state: UIState, grid_width: int):
+        """Draw dream-like overlay when in imagination mode."""
+        # Semi-transparent purple overlay for dream effect
+        overlay = pygame.Surface((grid_width, self.screen.get_height()), pygame.SRCALPHA)
+        overlay.fill((100, 50, 150, 40))  # Purple tint
+        self.screen.blit(overlay, (0, 0))
+        
+        # Draw "IMAGINATION MODE" banner at top
+        banner_height = 35
+        banner = pygame.Surface((grid_width, banner_height), pygame.SRCALPHA)
+        banner.fill((80, 40, 120, 200))  # Dark purple
+        self.screen.blit(banner, (0, 0))
+        
+        # Title text
+        title_text = "IMAGINATION MODE - Playing in World Model's Mind"
+        title_surf = self.fonts["title"].render(title_text, True, (200, 150, 255))
+        title_rect = title_surf.get_rect(center=(grid_width // 2, banner_height // 2))
+        self.screen.blit(title_surf, title_rect)
+        
+        # Draw info panel at bottom
+        info_y = self.screen.get_height() - 70
+        info_panel = pygame.Surface((grid_width, 70), pygame.SRCALPHA)
+        info_panel.fill((40, 20, 60, 180))
+        self.screen.blit(info_panel, (0, info_y))
+        
+        # Stats
+        stats_x = 10
+        stats_y = info_y + 10
+        
+        step_text = f"Steps: {state.imagination_step_count}"
+        step_surf = self.fonts["normal"].render(step_text, True, (200, 200, 255))
+        self.screen.blit(step_surf, (stats_x, stats_y))
+        
+        reward_text = f"Predicted Reward: {state.imagination_reward:.2f}"
+        reward_color = (100, 255, 100) if state.imagination_reward >= 0 else (255, 100, 100)
+        reward_surf = self.fonts["normal"].render(reward_text, True, reward_color)
+        self.screen.blit(reward_surf, (stats_x, stats_y + 20))
+        
+        win_text = f"Win Probability: {state.imagination_win_prob * 100:.1f}%"
+        win_surf = self.fonts["normal"].render(win_text, True, (255, 220, 100))
+        self.screen.blit(win_surf, (stats_x, stats_y + 40))
+        
+        # Exit hint
+        hint_text = "Press [I] to exit imagination mode"
+        hint_surf = self.fonts["normal"].render(hint_text, True, (150, 150, 200))
+        hint_rect = hint_surf.get_rect(right=grid_width - 10, bottom=self.screen.get_height() - 10)
+        self.screen.blit(hint_surf, hint_rect)
+        
+        # Draw pulsing border for dream effect
+        import time
+        pulse = int(128 + 127 * (0.5 + 0.5 * ((time.time() * 2) % 1)))
+        border_color = (pulse // 2, 50, pulse)
+        pygame.draw.rect(self.screen, border_color, (0, 0, grid_width, self.screen.get_height()), 4)

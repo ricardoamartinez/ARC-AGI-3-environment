@@ -116,8 +116,8 @@ class JEPAVisualizer:
         self.dragging = False
         self.last_mouse_pos = (0, 0)
         
-        # Color mode for points
-        self.color_mode_idx = 0  # Index into COLOR_MODES
+        # Color mode for points (default to effectiveness: green=good, red=bad)
+        self.color_mode_idx = 1  # 1 = effectiveness mode (green/red)
         
         # Thread-safe update queue
         self.update_queue = queue.Queue()
@@ -244,19 +244,31 @@ class JEPAVisualizer:
                 
     def _run(self):
         """Main visualization loop."""
-        pygame.init()
-        screen = pygame.display.set_mode((self.width, self.height))
-        pygame.display.set_caption(self.title)
-        clock = pygame.time.Clock()
-        
-        # Fonts
         try:
-            font = pygame.font.SysFont("consolas", 12)
-            title_font = pygame.font.SysFont("consolas", 16, bold=True)
-        except:
-            font = pygame.font.Font(None, 14)
-            title_font = pygame.font.Font(None, 18)
-        
+            pygame.init()
+            screen = pygame.display.set_mode((self.width, self.height))
+            pygame.display.set_caption(self.title)
+            clock = pygame.time.Clock()
+            
+            # Fonts
+            try:
+                font = pygame.font.SysFont("consolas", 12)
+                title_font = pygame.font.SysFont("consolas", 16, bold=True)
+            except:
+                font = pygame.font.Font(None, 14)
+                title_font = pygame.font.Font(None, 18)
+            
+            self._run_loop(screen, font, title_font, clock)
+        except Exception as e:
+            print(f"Visualizer error: {e}")
+        finally:
+            try:
+                pygame.quit()
+            except:
+                pass
+    
+    def _run_loop(self, screen, font, title_font, clock):
+        """Inner loop separated for cleaner error handling."""
         while self.running:
             # Handle events
             for event in pygame.event.get():
@@ -312,16 +324,29 @@ class JEPAVisualizer:
             # Clear screen
             screen.fill((0, 0, 0))  # OLED black
             
-            # Draw sections
-            self._draw_3d_scatter(screen, font, title_font)
-            self._draw_metrics(screen, font, title_font)
-            self._draw_decoded_grid(screen, font, title_font)
-            self._draw_legend(screen, font)
+            # Draw sections - with error handling for each to prevent crashes
+            try:
+                self._draw_3d_scatter(screen, font, title_font)
+            except Exception as e:
+                pass  # Silently continue
+                
+            try:
+                self._draw_metrics(screen, font, title_font)
+            except Exception as e:
+                pass
+                
+            try:
+                self._draw_decoded_grid(screen, font, title_font)
+            except Exception as e:
+                pass
+                
+            try:
+                self._draw_legend(screen, font)
+            except Exception as e:
+                pass
             
             pygame.display.flip()
             clock.tick(30)  # 30 FPS
-            
-        pygame.quit()
         
     def _handle_click(self, pos: Tuple[int, int]):
         """Handle click to select/pin a point or unpin."""
@@ -706,7 +731,7 @@ class JEPAVisualizer:
         # Each grid gets 1/3 of available width
         grid_width = available_width // 3
         # Calculate cell size to fit grid in available space - use the larger of width/height
-        grid_dim = self.decoded_grid.shape[0]  # Assume square grid
+        grid_dim = int(self.decoded_grid.shape[0])  # Assume square grid, ensure Python int
         # Make grids as big as possible within constraints
         max_cell_from_width = grid_width // grid_dim
         max_cell_from_height = available_height // grid_dim

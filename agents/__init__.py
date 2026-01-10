@@ -10,13 +10,8 @@ from .swarm import Swarm
 
 # Core agents (best-effort). These imports register subclasses for AVAILABLE_AGENTS,
 # but should never prevent importing `agents` in minimal environments.
-Manual: type[Agent] | None
-try:  # pragma: no cover
-    from .manual.agent import Manual as _Manual
-except ModuleNotFoundError:  # pragma: no cover
-    Manual = None
-else:
-    Manual = _Manual
+# Note: Manual agent has been consolidated into JEPAAgent - use JEPAAgent for both
+# RL training and interactive control.
 
 JEPAAgent: type[Agent] | None
 try:  # pragma: no cover
@@ -43,7 +38,6 @@ for rec in Recorder.list():
 __all__ = [
     "Swarm",
     "Random",
-    "Manual",
     "JEPAAgent",
     "Agent",
     "Recorder",

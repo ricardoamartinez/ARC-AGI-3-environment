@@ -105,24 +105,38 @@ class RotaryPositionalEmbedding3D(nn.Module):
         self.max_t = max_t
         
         # Partition dim into segments for T, H, W
+        # RoPE uses pairs of dimensions, so each segment must be EVEN
         # For 2D (max_t=1), we split between H and W only
         if max_t > 1:
-            self.dim_t = dim // 3
-            self.dim_h = dim // 3
-            self.dim_w = dim - 2 * (dim // 3)
+            # Split frequency pairs evenly across T, H, W
+            total_pairs = dim // 2  # e.g., 32 pairs for dim=64
+            pairs_t = total_pairs // 3  # e.g., 10 pairs
+            pairs_h = total_pairs // 3  # e.g., 10 pairs
+            pairs_w = total_pairs - 2 * pairs_t  # e.g., 12 pairs (remainder)
+            self.dim_t = pairs_t * 2  # e.g., 20
+            self.dim_h = pairs_h * 2  # e.g., 20
+            self.dim_w = pairs_w * 2  # e.g., 24
+            # Total: 20 + 20 + 24 = 64 ✓
         else:
-            # 2D case: split between H and W
+            # 2D case: split between H and W (both even)
             self.dim_t = 0
-            self.dim_h = dim // 2
-            self.dim_w = dim - dim // 2
+            total_pairs = dim // 2
+            pairs_h = total_pairs // 2
+            pairs_w = total_pairs - pairs_h
+            self.dim_h = pairs_h * 2
+            self.dim_w = pairs_w * 2
         
         # Compute inverse frequencies for each axis
+        # Each inv_freq has dim/2 elements, which get doubled via cat([freqs,freqs])
         if self.dim_t > 0:
-            inv_freq_t = 1.0 / (base ** (torch.arange(0, self.dim_t, 2).float() / self.dim_t))
+            num_freqs_t = self.dim_t // 2
+            inv_freq_t = 1.0 / (base ** (torch.arange(0, num_freqs_t).float() / num_freqs_t))
             self.register_buffer('inv_freq_t', inv_freq_t, persistent=False)
         
-        inv_freq_h = 1.0 / (base ** (torch.arange(0, self.dim_h, 2).float() / self.dim_h))
-        inv_freq_w = 1.0 / (base ** (torch.arange(0, self.dim_w, 2).float() / self.dim_w))
+        num_freqs_h = self.dim_h // 2
+        num_freqs_w = self.dim_w // 2
+        inv_freq_h = 1.0 / (base ** (torch.arange(0, num_freqs_h).float() / num_freqs_h))
+        inv_freq_w = 1.0 / (base ** (torch.arange(0, num_freqs_w).float() / num_freqs_w))
         self.register_buffer('inv_freq_h', inv_freq_h, persistent=False)
         self.register_buffer('inv_freq_w', inv_freq_w, persistent=False)
         
@@ -567,3 +581,334 @@ class GridEncoder(nn.Module):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Alias for forward with CLS token output."""
         return self.forward(x, return_all_tokens=False)
+
+
+class TemporalGridEncoder(nn.Module):
+    """
+    Temporal-aware Grid Encoder that processes stacked frames for motion understanding.
+    
+    Key features:
+    - Frame stacking: Encodes N consecutive frames together
+    - Velocity channels: Explicit frame differences for motion detection
+    - True 3D-RoPE: Uses temporal dimension for position encoding
+    - Motion-aware representations for better moving object prediction
+    """
+    
+    def __init__(
+        self,
+        grid_size: int = 64,
+        patch_size: int = 8,
+        num_colors: int = 256,
+        embed_dim: int = 256,
+        depth: int = 6,
+        num_heads: int = 8,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.0,
+        num_frames: int = 4,  # Number of frames to stack
+    ):
+        super().__init__()
+        self.grid_size = grid_size
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.num_frames = num_frames
+        self.num_patches_per_side = grid_size // patch_size
+        self.num_patches_per_frame = self.num_patches_per_side ** 2
+        self.total_patches = self.num_patches_per_frame * num_frames
+        
+        # Color embedding for grid values
+        self.color_embed = nn.Embedding(num_colors, 16)
+        
+        # Patch projection with velocity channel
+        # Each patch contains: color embeddings + velocity (frame diff)
+        patch_dim = patch_size * patch_size * 16
+        self.patch_proj = nn.Linear(patch_dim, embed_dim)
+        
+        # Velocity encoder: encodes frame differences
+        self.velocity_proj = nn.Linear(patch_size * patch_size, embed_dim // 4)
+        self.combine_proj = nn.Linear(embed_dim + embed_dim // 4, embed_dim)
+        
+        # 3D-RoPE with temporal dimension enabled
+        self.rope = RotaryPositionalEmbedding3D(
+            dim=embed_dim,
+            max_h=self.num_patches_per_side,
+            max_w=self.num_patches_per_side,
+            max_t=num_frames,  # Enable temporal dimension
+        )
+        
+        # CLS token
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        
+        # Temporal aggregation tokens (one per frame, learns to summarize each frame)
+        self.temporal_tokens = nn.Parameter(torch.zeros(1, num_frames, embed_dim))
+        
+        # Transformer blocks
+        self.blocks = nn.ModuleList([
+            TransformerBlock(embed_dim, num_heads, mlp_ratio, dropout, use_rope=True)
+            for _ in range(depth)
+        ])
+        
+        # Final norm
+        self.norm = nn.LayerNorm(embed_dim)
+        
+        # Frame history buffer
+        self.frame_history: Optional[torch.Tensor] = None
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.temporal_tokens, std=0.02)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+    
+    def _compute_velocity_features(self, frames: torch.Tensor) -> torch.Tensor:
+        """
+        Compute velocity (frame difference) features.
+        
+        Args:
+            frames: (B, T, H, W) stacked frames
+            
+        Returns:
+            (B, T, num_patches, velocity_dim) velocity features
+        """
+        B, T, H, W = frames.shape
+        
+        # Compute frame differences (velocity)
+        # Pad first frame with zeros (no previous frame)
+        frame_diffs = torch.zeros_like(frames, dtype=torch.float32)
+        frame_diffs[:, 1:] = (frames[:, 1:].float() - frames[:, :-1].float())
+        
+        # Normalize differences to [-1, 1]
+        frame_diffs = frame_diffs / 16.0  # Assuming max color diff is ~16
+        frame_diffs = frame_diffs.clamp(-1, 1)
+        
+        # Reshape to patches
+        frame_diffs = frame_diffs.unfold(2, self.patch_size, self.patch_size)
+        frame_diffs = frame_diffs.unfold(3, self.patch_size, self.patch_size)
+        # (B, T, n_h, n_w, patch_size, patch_size)
+        frame_diffs = frame_diffs.reshape(B, T, -1, self.patch_size * self.patch_size)
+        # (B, T, num_patches, patch_size^2)
+        
+        return frame_diffs
+    
+    def _patchify_frames(self, frames: torch.Tensor) -> torch.Tensor:
+        """
+        Convert stacked frames to patch embeddings.
+        
+        Args:
+            frames: (B, T, H, W) stacked frames
+            
+        Returns:
+            (B, T*num_patches, embed_dim) patch embeddings
+        """
+        B, T, H, W = frames.shape
+        
+        # Embed colors for all frames
+        color_emb = self.color_embed(frames.long())  # (B, T, H, W, 16)
+        
+        # Reshape to patches
+        color_emb = color_emb.unfold(2, self.patch_size, self.patch_size)
+        color_emb = color_emb.unfold(3, self.patch_size, self.patch_size)
+        # (B, T, n_h, n_w, 16, patch_size, patch_size)
+        color_emb = color_emb.permute(0, 1, 2, 3, 5, 6, 4).contiguous()
+        # (B, T, n_h, n_w, patch_size, patch_size, 16)
+        color_emb = color_emb.reshape(B, T, -1, self.patch_size * self.patch_size * 16)
+        # (B, T, num_patches, patch_dim)
+        
+        # Project to embed_dim
+        patch_emb = self.patch_proj(color_emb)  # (B, T, num_patches, embed_dim)
+        
+        # Compute velocity features
+        velocity_feats = self._compute_velocity_features(frames)  # (B, T, num_patches, patch^2)
+        velocity_emb = self.velocity_proj(velocity_feats)  # (B, T, num_patches, embed_dim//4)
+        
+        # Combine patch + velocity
+        combined = torch.cat([patch_emb, velocity_emb], dim=-1)  # (B, T, num_patches, embed_dim + embed_dim//4)
+        combined = self.combine_proj(combined)  # (B, T, num_patches, embed_dim)
+        
+        # Flatten temporal and spatial
+        combined = combined.reshape(B, T * self.num_patches_per_frame, self.embed_dim)
+        
+        return combined
+    
+    def update_frame_history(self, frame: torch.Tensor):
+        """
+        Add a new frame to history buffer.
+        
+        Args:
+            frame: (B, H, W) or (H, W) single frame
+        """
+        if frame.dim() == 2:
+            frame = frame.unsqueeze(0)
+        B = frame.shape[0]
+        
+        if self.frame_history is None or self.frame_history.shape[0] != B:
+            # Initialize with repeated current frame
+            self.frame_history = frame.unsqueeze(1).repeat(1, self.num_frames, 1, 1)
+        else:
+            # Shift and add new frame
+            self.frame_history = torch.cat([
+                self.frame_history[:, 1:],
+                frame.unsqueeze(1)
+            ], dim=1)
+    
+    def reset_history(self):
+        """Reset frame history buffer."""
+        self.frame_history = None
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_all_tokens: bool = False,
+        use_history: bool = True,
+    ) -> torch.Tensor:
+        """
+        Encode frames to latent representation.
+        
+        Args:
+            x: (B, H, W) single frame or (B, T, H, W) stacked frames
+            return_all_tokens: Return all tokens or just CLS
+            use_history: If True and single frame, use frame history
+            
+        Returns:
+            Latent representation
+        """
+        # Handle single frame input
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
+        
+        if x.dim() == 3:
+            # Single frame - use history if available
+            if use_history:
+                self.update_frame_history(x)
+                x = self.frame_history
+            else:
+                # Repeat single frame
+                x = x.unsqueeze(1).repeat(1, self.num_frames, 1, 1)
+        
+        B, T, H, W = x.shape
+        assert T == self.num_frames, f"Expected {self.num_frames} frames, got {T}"
+        
+        # Get patch embeddings with velocity
+        patches = self._patchify_frames(x)  # (B, T*num_patches, embed_dim)
+        
+        # Add CLS token
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls_tokens, patches], dim=1)  # (B, 1 + T*num_patches, embed_dim)
+        
+        # Get 3D-RoPE embeddings
+        rope_cos, rope_sin = self.rope.get_rotary_embedding(
+            self.num_patches_per_side,
+            self.num_patches_per_side,
+            num_frames=T,
+            device=x.device,
+        )
+        # Add zeros for CLS token
+        cls_zeros = torch.zeros(1, self.embed_dim, device=x.device)
+        rope_cos = torch.cat([cls_zeros, rope_cos], dim=0)
+        rope_sin = torch.cat([cls_zeros, rope_sin], dim=0)
+        
+        # Transformer blocks
+        for block in self.blocks:
+            x = block(x, rope_cos=rope_cos, rope_sin=rope_sin)
+        
+        x = self.norm(x)
+        
+        if return_all_tokens:
+            return x
+        else:
+            return x[:, 0]  # CLS token
+    
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode with CLS token output."""
+        return self.forward(x, return_all_tokens=False)
+
+
+class GridDecoder(nn.Module):
+    """
+    Decoder that converts latent embeddings back to grid predictions.
+    
+    Used for visualization and understanding what the world model "sees".
+    """
+    
+    def __init__(
+        self,
+        latent_dim: int = 256,
+        grid_size: int = 64,
+        num_colors: int = 11,
+        hidden_dim: int = 512,
+    ):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.grid_size = grid_size
+        self.num_colors = num_colors
+        
+        # Project latent to spatial features
+        self.project = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+        )
+        
+        # Upscale to grid
+        # Start from 8x8 and upscale to grid_size
+        self.init_size = 8
+        self.project_spatial = nn.Linear(hidden_dim, self.init_size * self.init_size * 64)
+        
+        # Transposed convolutions to upscale
+        # 8x8 -> 16x16 -> 32x32 -> 64x64
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(64, 64, kernel_size=4, stride=2, padding=1),  # 8->16
+            nn.BatchNorm2d(64),
+            nn.GELU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),  # 16->32
+            nn.BatchNorm2d(32),
+            nn.GELU(),
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),  # 32->64
+            nn.BatchNorm2d(16),
+            nn.GELU(),
+            nn.Conv2d(16, num_colors, kernel_size=3, padding=1),  # Final prediction
+        )
+        
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Decode latent to grid logits.
+        
+        Args:
+            z: (batch, latent_dim) latent embedding
+            
+        Returns:
+            (batch, num_colors, grid_size, grid_size) grid logits
+        """
+        B = z.shape[0]
+        
+        # Project to hidden
+        h = self.project(z)  # (B, hidden_dim)
+        
+        # Project to spatial
+        h = self.project_spatial(h)  # (B, init_size * init_size * 64)
+        h = h.view(B, 64, self.init_size, self.init_size)
+        
+        # Decode to grid
+        logits = self.decoder(h)  # (B, num_colors, grid_size, grid_size)
+        
+        return logits
+    
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Decode latent to discrete grid.
+        
+        Args:
+            z: (batch, latent_dim) latent embedding
+            
+        Returns:
+            (batch, grid_size, grid_size) decoded grid (uint8)
+        """
+        logits = self.forward(z)
+        return logits.argmax(dim=1)

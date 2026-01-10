@@ -169,6 +169,14 @@ class ActionConditionedPredictor(nn.Module):
         # Patch token projection (from encoder latent_dim to hidden_dim)
         self.token_proj = nn.Linear(latent_dim, hidden_dim)
         
+        # === FiLM CONDITIONING: Force action to modulate features ===
+        # Actions generate scale and shift parameters that MUST affect the output
+        self.film_generator = nn.Sequential(
+            nn.Linear(action_embed_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim * 2),  # gamma and beta
+        )
+        
         # Learnable temporal position embedding for each timestep's tokens
         # (action token, then patch tokens at each timestep)
         self.time_embed = nn.Embedding(64, hidden_dim)  # max 64 timesteps
@@ -258,6 +266,12 @@ class ActionConditionedPredictor(nn.Module):
         action_combined = torch.cat([discrete_emb, continuous_emb], dim=-1)  # (B, 128)
         action_token = self.action_proj(action_combined).unsqueeze(1)  # (B, 1, hidden_dim)
         
+        # === FiLM: Generate action-dependent scale and shift ===
+        # This FORCES the action to influence every feature
+        film_params = self.film_generator(action_combined)  # (B, hidden_dim * 2)
+        gamma = film_params[:, :self.hidden_dim].unsqueeze(1)  # (B, 1, hidden_dim) - scale
+        beta = film_params[:, self.hidden_dim:].unsqueeze(1)   # (B, 1, hidden_dim) - shift
+        
         # Project patch tokens
         patch_tokens = self.token_proj(z)  # (B, num_patches, hidden_dim)
         
@@ -267,23 +281,26 @@ class ActionConditionedPredictor(nn.Module):
         patch_tokens = patch_tokens + time_emb
         
         # Interleave: [action, patch1, patch2, ...] for this timestep
-        # In single-step mode, this is simple concatenation
         x = torch.cat([action_token, patch_tokens], dim=1)  # (B, 1+num_patches, hidden_dim)
         
-        # No causal mask needed for single timestep (all can attend to all)
+        # Transformer layers
         for layer in self.layers:
             x = layer(x, causal_mask=None)
         
         x = self.norm(x)
+        
+        # === Apply FiLM modulation AFTER transformer ===
+        # This ensures action directly affects the output, can't be ignored
+        x = gamma * x + beta
         
         # Output: project patch tokens back to latent_dim
         # Skip the action token (first token)
         patch_out = x[:, 1:, :]  # (B, num_patches, hidden_dim)
         patch_out = self.output_proj(patch_out)  # (B, num_patches, latent_dim)
         
-        # Residual connection
-        alpha = torch.sigmoid(self.residual_weight)
-        z_next = z + alpha * patch_out
+        # Direct delta prediction - NO learned residual weight
+        # Model MUST predict the change, can't learn to ignore it
+        z_next = z + patch_out  # z_next = z + delta, model must learn delta
         
         # Return CLS token if that's what was input, else return all
         if num_patches == 1:

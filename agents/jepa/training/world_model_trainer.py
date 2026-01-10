@@ -14,6 +14,7 @@ import torch
 
 from ..envs.arc_env import ARCGymEnv
 from ..viz.live_visualizer import LiveVisualizerCallback
+from ..viz.jepa_visualizer import JEPAVisualizer
 from ..world_model import WorldModel
 from ..intrinsic import StateCounter
 
@@ -96,6 +97,14 @@ def run_world_model_training(agent) -> None:
     predictor_heads = int(os.environ.get("WM_PREDICTOR_HEADS", "8"))
 
     # Initialize world model with V-JEPA 2 style architecture
+    # Temporal and memory settings
+    use_temporal_encoder = os.environ.get("WM_USE_TEMPORAL", "1") == "1"
+    num_frames = int(os.environ.get("WM_NUM_FRAMES", "4"))
+    use_ewc = os.environ.get("WM_USE_EWC", "1") == "1"
+    ewc_lambda = float(os.environ.get("WM_EWC_LAMBDA", "100.0"))
+    ewc_consolidate_every = int(os.environ.get("WM_EWC_CONSOLIDATE_EVERY", "500"))
+    consolidation_buffer_size = int(os.environ.get("WM_CONSOLIDATION_SIZE", "500"))
+    
     world_model = WorldModel(
         grid_size=env.grid_size,
         latent_dim=latent_dim,
@@ -117,10 +126,34 @@ def run_world_model_training(agent) -> None:
         use_patch_tokens=use_patch_tokens,
         predictor_layers=predictor_layers,
         predictor_heads=predictor_heads,
+        # Temporal encoding for motion awareness
+        use_temporal_encoder=use_temporal_encoder,
+        num_frames=num_frames,
+        # EWC for catastrophic forgetting prevention
+        use_ewc=use_ewc,
+        ewc_lambda=ewc_lambda,
+        ewc_consolidate_every=ewc_consolidate_every,
+        consolidation_buffer_size=consolidation_buffer_size,
     )
 
     # Curiosity module for exploration
     curiosity = StateCounter(reward_scale=curiosity_scale) if use_curiosity else None
+
+    # 3D PCA Latent Visualizer (like RTAC)
+    show_viz = os.environ.get("JEPA_SHOW_VIZ", "1") == "1"
+    visualizer: Optional[JEPAVisualizer] = None
+    if show_viz:
+        try:
+            visualizer = JEPAVisualizer(
+                width=1000,
+                height=700,
+                title=f"World Model Latent Space - {agent.game_id}",
+            )
+            visualizer.start()
+            logger.info("Started 3D PCA Latent Visualizer - click points to see decoded grids")
+        except Exception as e:
+            logger.warning(f"Could not start visualizer: {e}")
+            visualizer = None
 
     # Bootstrap
     env.reset()
@@ -132,6 +165,7 @@ def run_world_model_training(agent) -> None:
 
     step = 0
     total_wins = 0
+    last_train_stats = {}  # Persist last training stats for logging
 
     prev_cx: int | None = None
     prev_cy: int | None = None
@@ -151,9 +185,65 @@ def run_world_model_training(agent) -> None:
             return g
         return out
 
+    # Track imagination mode state
+    in_imagination = False
+    imagination_initial_grid = None
+    
     try:
         while not agent._quit_event.is_set():
             step += 1
+            
+            # ==================== IMAGINATION MODE ====================
+            # Handle imagination mode: let user play in world model's predictions
+            if agent.imagination_mode:
+                if not in_imagination:
+                    # Just entered imagination mode - initialize
+                    current_grid = env.last_grid
+                    if current_grid is not None:
+                        imagination_initial_grid = current_grid.copy()
+                        imagined_grid = world_model.enter_imagination(current_grid)
+                        agent.imagination_grid = imagined_grid.tolist()
+                        agent.imagination_step_count = 0
+                        in_imagination = True
+                        logger.info("Entered imagination mode - playing in world model's mind")
+                
+                # Process imagination action if pending
+                if in_imagination and agent.imagination_action is not None:
+                    cont_action = np.array(agent.imagination_action["cont_action"], dtype=np.float32)
+                    disc_action = int(agent.imagination_action["disc_action"])
+                    agent.imagination_action = None  # Clear the pending action
+                    
+                    # Take a step in imagination
+                    try:
+                        predicted_grid, pred_reward, win_prob = world_model.imagine_step(
+                            cont_action, disc_action
+                        )
+                        agent.imagination_grid = predicted_grid.tolist()
+                        agent.imagination_reward = pred_reward
+                        agent.imagination_win_prob = win_prob
+                        agent.imagination_step_count += 1
+                        logger.debug(f"Imagination step {agent.imagination_step_count}: reward={pred_reward:.2f}, win_prob={win_prob:.2f}")
+                    except Exception as e:
+                        logger.warning(f"Imagination step error: {e}")
+                
+                # Always send UI update during imagination mode
+                if callback:
+                    callback.on_step({
+                        "imagination_mode": True,
+                        "imagination_reward": agent.imagination_reward,
+                        "imagination_win_prob": agent.imagination_win_prob,
+                    })
+                
+                # In imagination mode, skip regular training loop
+                time.sleep(0.02)  # Small delay to not hog CPU
+                continue
+            else:
+                if in_imagination:
+                    # Just exited imagination mode
+                    world_model.exit_imagination()
+                    in_imagination = False
+                    agent.imagination_grid = None
+                    logger.info("Exited imagination mode - back to reality")
 
             # Get current grid
             current_grid = env.last_grid
@@ -165,6 +255,10 @@ def run_world_model_training(agent) -> None:
             if prev_cx is None or prev_cy is None:
                 prev_cx, prev_cy = cx0, cy0
             state_for_model = _grid_with_cursors(current_grid, cur_cx=cx0, cur_cy=cy0, prev_xy=(prev_cx, prev_cy))
+
+            # Initialize rollout state for honest visualization (first step only)
+            if step == 0 or world_model._rollout_z is None:
+                world_model.init_rollout_state(state_for_model)
 
             # Choose action
             if step < exploration_steps or not use_planner or world_model.wins_seen == 0:
@@ -257,10 +351,87 @@ def run_world_model_training(agent) -> None:
                 win=win,
             )
 
+            # Feed latent embeddings to 3D visualizer (like RTAC)
+            if visualizer is not None and step % 5 == 0:  # Every 5 steps to reduce overhead
+                try:
+                    with torch.no_grad():
+                        # Encode current state to latent (visual embedding)
+                        grid_t = torch.from_numpy(state_for_model).unsqueeze(0).to(device)
+                        z = world_model.encoder(grid_t)  # (1, latent_dim) or (1, num_patches+1, latent_dim)
+                        if z.dim() == 3:
+                            visual_emb = z[:, 0]  # Use CLS token
+                        else:
+                            visual_emb = z
+                        
+                        # Get action embedding and combine with visual (joint embedding)
+                        action_idx = disc_token_for_model if disc_token_for_model > 0 else 0
+                        action_t = torch.tensor([action_idx], device=device)
+                        action_emb = world_model.predictor.discrete_embed(action_t)  # (1, 64)
+                        
+                        # Combine: pad action_emb to latent_dim or project
+                        if action_emb.shape[-1] < visual_emb.shape[-1]:
+                            # Pad action embedding to match visual dim
+                            padded_action = torch.zeros_like(visual_emb)
+                            padded_action[:, :action_emb.shape[-1]] = action_emb
+                            joint_emb = visual_emb + padded_action
+                        else:
+                            joint_emb = visual_emb + action_emb[:, :visual_emb.shape[-1]]
+                        
+                        embedding = joint_emb.squeeze(0).cpu().numpy()
+                        
+                        # Predict next grid using HONEST multi-step rollout
+                        # This shows true model quality (like imagination mode)
+                        # Re-anchors every 10 steps to show "fresh restart" quality
+                        predicted_grid = world_model.predict_next_grid_from_rollout(
+                            cont_for_model,
+                            action_idx,
+                            real_grid=state_for_model,  # For re-anchoring
+                            reanchor_every=10,  # Reset every 10 steps to show both
+                        )
+                        
+                        # Determine if action had effect (for green/red coloring)
+                        # Use the environment's "action_had_effect" field which indicates
+                        # if the discrete action actually changed the game state
+                        # GREEN = action changed game state (effective)
+                        # RED = action had no effect (wasted/ineffective)
+                        env_had_effect = bool(info.get("action_had_effect", False)) if info else False
+                        had_effect = (
+                            env_had_effect or  # Action changed the game state
+                            win or  # Win is always good
+                            reward > 0  # Any positive reward
+                        )
+                        
+                        visualizer.add_embedding(
+                            embedding=embedding,
+                            action_idx=action_idx,
+                            had_effect=had_effect,
+                            grid=state_for_model,
+                            cursor=(float(cx0), float(cy0)),
+                            predicted_grid=predicted_grid,
+                            next_grid=next_for_model,
+                        )
+                        # Debug: log first few had_effect values
+                        if step < 100 and step % 20 == 0:
+                            logger.debug(f"VIZ: step={step} reward={reward:.2f} env_had_effect={env_had_effect} had_effect={had_effect}")
+                except Exception as e:
+                    if step < 50:  # Log early errors for debugging
+                        logger.warning(f"Visualizer error at step {step}: {e}")
+
             # Train world model
-            train_stats = {}
             if step % train_every == 0:
                 train_stats = world_model.train_step()
+                if train_stats:
+                    last_train_stats = train_stats  # Persist for logging
+                    # Update visualizer with training metrics
+                    if visualizer is not None:
+                        try:
+                            visualizer.add_metrics(
+                                loss=train_stats.get("predictor_loss", 0),
+                                accuracy=1.0 - min(1.0, train_stats.get("predictor_loss", 1.0)),  # Approx accuracy
+                                latent_loss=train_stats.get("reward_loss", 0),
+                            )
+                        except Exception:
+                            pass
 
             # Update callback
             info["reward"] = float(reward)
@@ -282,6 +453,8 @@ def run_world_model_training(agent) -> None:
                 prev_cy = None
                 try:
                     env.reset()
+                    # Re-init rollout state after reset for honest visualization
+                    world_model._rollout_z = None
                 except Exception:
                     # If reset fails (e.g., transient API issue), keep going.
                     pass
@@ -295,9 +468,11 @@ def run_world_model_training(agent) -> None:
             # Logging
             if log_every > 0 and step % log_every == 0:
                 stats_str = ""
-                if train_stats:
-                    stats_str = f" pred_loss={train_stats.get('predictor_loss', 0):.4f}"
-                    stats_str += f" win_loss={train_stats.get('win_loss', 0):.4f}"
+                if last_train_stats:
+                    stats_str = f" pred_loss={last_train_stats.get('predictor_loss', 0):.4f}"
+                    stats_str += f" win_loss={last_train_stats.get('win_loss', 0):.4f}"
+                    stats_str += f" reward_loss={last_train_stats.get('reward_loss', 0):.4f}"
+                    stats_str += f" dec_loss={last_train_stats.get('decoder_loss', 0):.4f}"
 
                 logger.info(
                     "step=%s reward=%.3f curiosity=%.4f wins=%d buffer=%d%s",
@@ -312,6 +487,14 @@ def run_world_model_training(agent) -> None:
     except KeyboardInterrupt:
         logger.info("Training interrupted")
     finally:
+        # Stop visualizer
+        if visualizer is not None:
+            try:
+                visualizer.stop()
+                logger.info("Stopped 3D PCA Visualizer")
+            except Exception:
+                pass
+        
         agent.cleanup()
         # Save world model
         try:

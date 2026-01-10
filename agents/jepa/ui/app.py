@@ -1,19 +1,30 @@
+"""
+JEPA Game UI - Main application for visualizing ARC-AGI-3 agent training.
+
+This is the pygame window that shows:
+- The game grid with cursor and goal
+- Training metrics graphs
+- Keyboard visualization with penalty feedback
+- Speed/dopamine/pain controls
+"""
 import sys
 import pygame
-import collections
 import logging
 
-logger = logging.getLogger("manual_ui")
-
 from .constants import *
-from .state import GameState
+from .state import UIState
 from .network import NetworkHandler
 from .input import InputProcessor
-from .ui.renderer import GameRenderer
-from .ui.components import Button, Slider
+from .renderer import GameRenderer
+from .components import Button, Slider
 from .utils import lerp
 
-class ManualGame:
+logger = logging.getLogger("jepa_ui")
+
+
+class JEPAGameUI:
+    """Main JEPA visualization window."""
+    
     def __init__(self):
         try:
             pygame.init()
@@ -24,7 +35,7 @@ class ManualGame:
         self.window_width = WINDOW_WIDTH_DEFAULT
         self.window_height = WINDOW_HEIGHT_DEFAULT
         self.screen = pygame.display.set_mode((self.window_width, self.window_height), pygame.RESIZABLE)
-        pygame.display.set_caption("ARC-AGI-3 Agent (Refactored)")
+        pygame.display.set_caption("ARC-AGI-3 JEPA Agent")
 
         # Resources
         self.clock = pygame.time.Clock()
@@ -36,7 +47,7 @@ class ManualGame:
         }
 
         # Subsystems
-        self.state = GameState()
+        self.state = UIState()
         self.network = NetworkHandler()
         self.renderer = GameRenderer(self.screen, self.fonts)
         self.input_processor = InputProcessor(self.state, self.network)
@@ -45,7 +56,7 @@ class ManualGame:
         self.scale_factor = SCALE_FACTOR_DEFAULT
         self.grid_width = GRID_WIDTH_DEFAULT
 
-        # UI Components (Initialized later/dynamically)
+        # UI Components
         self.slider = None
         self.d_btn = None
         self.p_btn = None
@@ -56,11 +67,9 @@ class ManualGame:
             self._handle_network_messages()
             self._update_layout_and_controls()
             
-            # Event Processing
             events = pygame.event.get()
             self.input_processor.process_events(events, self.scale_factor)
             
-            # UI Event Handling
             if not self.state.game_select_mode:
                 self._handle_ui_events(events)
             else:
@@ -80,44 +89,28 @@ class ManualGame:
             self._process_message(data)
 
     def _process_message(self, data):
-        # Update State based on data
         if "last_action" in data:
             self.state.last_action_info = data["last_action"]
-            # DEBUG: Log what we receive safely
-            # logger.info(f"[MSG] last_action received: {self.state.last_action_info}")
             if self.state.last_action_info:
-                action_name = self.state.last_action_info.get("name", "")
                 action_id = self.state.last_action_info.get("id")
                 adata = self.state.last_action_info.get("data", {})
                 now = pygame.time.get_ticks()
-                
-                # Map action ids to key symbols for discrete game actions
-                # Only highlight when we have an actual action_id (discrete action triggered)
-                # Track if action was penalized (had_effect = False)
                 had_effect = self.state.last_action_info.get("had_effect", True)
                 
                 if action_id is not None:
                     key_sym = None
-                    if action_id == 1:  # ACTION1 = UP
-                        key_sym = "↑"
-                    elif action_id == 2:  # ACTION2 = DOWN
-                        key_sym = "↓"
-                    elif action_id == 3:  # ACTION3 = LEFT
-                        key_sym = "←"
-                    elif action_id == 4:  # ACTION4 = RIGHT
-                        key_sym = "→"
-                    elif action_id == 5:  # ACTION5 = SPACE
-                        key_sym = "␣"
-                    elif action_id == 6:  # ACTION6 = CLICK
-                        key_sym = "␣"  # Click shows as space
-                    elif action_id == 7:  # ACTION7 = ENTER
-                        key_sym = "↵"
+                    if action_id == 1: key_sym = "UP"
+                    elif action_id == 2: key_sym = "DOWN"
+                    elif action_id == 3: key_sym = "LEFT"
+                    elif action_id == 4: key_sym = "RIGHT"
+                    elif action_id == 5: key_sym = "SPACE"
+                    elif action_id == 6: key_sym = "SPACE"
+                    elif action_id == 7: key_sym = "ENTER"
                     
                     if key_sym:
                         self.state.key_activations[key_sym] = now
-                        self.state.key_penalized[key_sym] = not had_effect  # Red if no effect
+                        self.state.key_penalized[key_sym] = not had_effect
                 
-                # Handle click action
                 if action_id == 6:
                     self.state.last_click_pos = (adata.get("x", 0), adata.get("y", 0))
                     self.state.last_click_time = now
@@ -148,7 +141,6 @@ class ManualGame:
 
         if "metrics" in data:
             m = data["metrics"]
-            # Extract all metrics for graphs
             metrics_keys = [
                 "reward", "dopamine", "confidence", "manual_dopamine", 
                 "manual_pain", "trigger", "cursor_speed", "action_energy",
@@ -164,7 +156,6 @@ class ManualGame:
             if "current_thought" in m:
                 self.state.current_thought = m["current_thought"]
             
-            # Trim history
             for k in self.state.metrics_history:
                 if len(self.state.metrics_history[k]) > MAX_HISTORY:
                     self.state.metrics_history[k] = self.state.metrics_history[k][-MAX_HISTORY:]
@@ -187,9 +178,21 @@ class ManualGame:
         elif "action" in data and data["action"] == "SHOW_GAME_SELECTOR":
             self.state.available_games = data.get("games", [])
             self.state.game_select_mode = True
+        
+        # Handle imagination mode updates from trainer
+        if "imagination_mode" in data:
+            self.state.imagination_mode = data["imagination_mode"]
+        if "imagination_grid" in data and data["imagination_grid"] is not None:
+            self.state.imagination_grid = data["imagination_grid"]
+        if "imagination_reward" in data:
+            self.state.imagination_reward = data["imagination_reward"]
+        if "imagination_win_prob" in data:
+            self.state.imagination_win_prob = data["imagination_win_prob"]
+        if "imagination_step_count" in data:
+            self.state.imagination_step_count = data["imagination_step_count"]
 
     def _update_scaling(self, grid):
-        if self.scale_factor == 1: # Only update if not set (or create a flag for initial set)
+        if self.scale_factor == 1:
             grid_h = len(grid)
             grid_w = len(grid[0])
             scale_x = 800 // grid_w
@@ -207,8 +210,6 @@ class ManualGame:
                 self.screen = pygame.display.set_mode((self.window_width, self.window_height), pygame.RESIZABLE)
 
     def _update_layout_and_controls(self):
-        # Recreate/Update UI controls based on current dimensions
-        # Constants from original code
         SIDEBAR_X = self.grid_width
         SIDEBAR_PAD = 20
         CONTROLS_Y_START = self.window_height - 200
@@ -216,15 +217,13 @@ class ManualGame:
         slider_x = SIDEBAR_X + SIDEBAR_PAD
         slider_w = SIDEBAR_WIDTH - (SIDEBAR_PAD * 2)
         
-        # Speed Slider
         self.slider = Slider(
             pygame.Rect(slider_x, CONTROLS_Y_START + 25, slider_w, 20),
             0.0, 1.0, self.state.speed_val,
             callback=lambda v: self._set_speed(v)
         )
-        self.slider.dragging = self.state.dragging_slider # Sync state
+        self.slider.dragging = self.state.dragging_slider
 
-        # Dopamine Button
         d_btn_y = CONTROLS_Y_START + 75
         self.d_btn = Button(
             pygame.Rect(slider_x, d_btn_y, slider_w, 40),
@@ -235,7 +234,6 @@ class ManualGame:
         )
         self.d_btn.is_active = self.state.holding_d_key
 
-        # Pain Button
         p_btn_y = d_btn_y + 50
         self.p_btn = Button(
             pygame.Rect(slider_x, p_btn_y, slider_w, 40),
@@ -246,7 +244,6 @@ class ManualGame:
         )
         self.p_btn.is_active = self.state.holding_p_key
 
-        # Heatmap Buttons
         self.heatmap_btns = []
         hm_y_start = p_btn_y + 50
         cols = 4
@@ -262,15 +259,13 @@ class ManualGame:
             
             btn = Button(
                 pygame.Rect(hm_x, hm_y, hm_btn_w, hm_btn_h),
-                mode[:4].capitalize(), # Short label
+                mode[:4].capitalize(),
                 self.fonts["small"],
                 HEATMAP_COLORS.get(mode, (100, 100, 100)),
                 (255, 255, 255),
-                active_color=HEATMAP_COLORS.get(mode, (200, 200, 200)), # Simplified
+                active_color=HEATMAP_COLORS.get(mode, (200, 200, 200)),
                 callback=lambda m=mode: self._set_heatmap(m)
             )
-            # Active check logic needs to be checked in draw or passed
-            # We'll just rely on state
             self.heatmap_btns.append(btn)
 
     def _set_speed(self, val):
@@ -289,36 +284,28 @@ class ManualGame:
 
     def _handle_ui_events(self, events):
         for event in events:
-            # Pass to slider
             if self.slider and self.slider.handle_event(event):
                 self.state.dragging_slider = self.slider.dragging
             
-            # Pass to buttons
             if self.d_btn: self.d_btn.handle_event(event)
             if self.p_btn: self.p_btn.handle_event(event)
             for btn in self.heatmap_btns:
                 btn.handle_event(event)
             
-            # Mouse Up specific logic for releasing holds
             if event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1:
-                    # Release buttons if they were held by click
-                    # The buttons handle click callbacks, but release logic is global here
                     if self.state.holding_d_key: self.state.holding_d_key = False
                     if self.state.holding_p_key: self.state.holding_p_key = False
 
-            # KeyDown events for shortcuts
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_b:
                     self.network.send_action("BREED_MOTIVATION")
 
-
     def _handle_game_select_events(self, events):
-         for event in events:
+        for event in events:
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = event.pos
                 
-                # Check grid
                 cols = 4
                 box_w = 150
                 box_h = 150
@@ -339,7 +326,6 @@ class ManualGame:
                         return
 
     def _update_logic(self):
-        # Animation
         now = pygame.time.get_ticks()
         if not self.state.game_select_mode and self.state.current_grids and len(self.state.current_grids) > 1:
             if now - self.state.animation_timer > ANIMATION_SPEED:
@@ -347,7 +333,6 @@ class ManualGame:
                 if self.state.current_grid_idx < len(self.state.current_grids) - 1:
                     self.state.current_grid_idx += 1
         
-        # Cursor Interpolation
         if self.state.visual_cursor_pos and self.state.cursor_pos:
             vx, vy = self.state.visual_cursor_pos
             tx, ty = self.state.cursor_pos
@@ -358,7 +343,6 @@ class ManualGame:
             if abs(ty - vy) < 0.01: vy = ty
             self.state.visual_cursor_pos = [vx, vy]
 
-        # Dopamine/Pain Logic
         if self.state.holding_d_key:
             self.state.manual_dopamine_val = min(1.0, self.state.manual_dopamine_val + 0.02)
         else:
@@ -369,8 +353,6 @@ class ManualGame:
         else:
             self.state.manual_pain_val = max(0.0, self.state.manual_pain_val - 0.02)
             
-        # Send updates if changed
-        # We need to store last sent values to avoid spamming
         if not hasattr(self, 'last_sent_dopamine'): self.last_sent_dopamine = -1
         if abs(self.state.manual_dopamine_val - self.last_sent_dopamine) > 0.01:
             self.network.send_action("SET_MANUAL_DOPAMINE", value=self.state.manual_dopamine_val)
@@ -387,22 +369,14 @@ class ManualGame:
         else:
             self.renderer.draw_main_interface(self.state, self.scale_factor, self.grid_width)
             
-            # Draw UI overlays (Buttons/Slider) on top of sidebar
-            # Note: renderer draws "controls placeholder", but we should actually draw the objects here
-            # or pass them to renderer.
-            # Since we have the objects:
             if self.slider: self.slider.draw(self.screen)
             if self.d_btn: self.d_btn.draw(self.screen)
             if self.p_btn: self.p_btn.draw(self.screen)
             for btn in self.heatmap_btns:
-                # Highlight if active
-                # The generic button class has is_active, but we need to update it for heatmap toggles
-                if btn.text.lower().startswith(self.state.selected_heatmap_mode[:3].lower()) and self.state.show_heatmap:
-                    # Rough check matching
-                    pass 
-                    # Actually we passed callback.
-                    
                 btn.draw(self.screen)
         
         pygame.display.flip()
 
+
+# Backwards compatibility alias
+ManualGame = JEPAGameUI
